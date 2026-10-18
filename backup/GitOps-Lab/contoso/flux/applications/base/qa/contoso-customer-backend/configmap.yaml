@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contoso-customer-backend-api-config
+  namespace: contoso
+  labels:
+    app: contoso-customer-backend
+    service: contoso-customer-backend
+data:
+  ApiUrls__ContosoBaseUrl: "https://contoso-customer-backend-qa.cloud.ssl.contoso-grp.com/"
+  CommandTelemetry__ActivitySourceName: Contoso-customer-backend.Commands
+  CommandTelemetry__MeterName: Contoso-customer-backend.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: LabCo-HKG91-Contoso-Customer-Backend
+  Logging__LogLevel__LabCo-HKG91-Contoso-Customer-Backend: Debug
+  OpenTelemetry__ServiceName: LabCo-HKG91-Contoso-Customer-Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: contoso-customer-backendService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: LabCo-HKG91-Contoso-Customer-Backend.Api
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Customer-Backend.Api: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Customer-Backend.Application: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Customer-Backend.Infrastructure: Debug

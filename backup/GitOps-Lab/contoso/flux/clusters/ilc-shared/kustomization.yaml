@@ -1,0 +1,21 @@
+---
+# NEW ARCHITECTURE - Main Entry Point
+# This is the entry point that Flux syncs to
+# 
+# MIGRATION:
+# 1. Backup current: mv kustomization.yaml kustomization-old.yaml
+# 2. Activate new:   mv kustomization-new.yaml kustomization.yaml
+# 3. Commit and push
+#
+# Flux will use the new layered architecture without changing the sync path!
+#
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # New layered architecture (4 Kustomizations)
+  - infrastructure.yaml       # External Secrets Operator
+  - operators.yaml            # MongoDB, RabbitMQ, Prometheus operators
+  - platform-services.yaml    # Secret Store, Monitoring, Headlamp, DBs, Messaging
+  - applications.yaml         # Business applications
+

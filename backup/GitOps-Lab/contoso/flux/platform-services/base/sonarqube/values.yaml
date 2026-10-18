@@ -1,0 +1,278 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sonarqube-values
+  namespace: sonarqube
+data:
+  values.yaml: |
+    # SonarQube Production Configuration
+    # Optimized for AKS with GitOps deployment
+    
+    # ================================
+    # Community Build Configuration
+    # ================================
+    community:
+      enabled: true  # Use SonarQube Community Build
+
+    # ================================
+    # Plugin Installation - Entra ID OIDC
+    # ================================
+    # sonar-auth-oidc community plugin by vaulttec provides native OIDC support.
+    # REQUIRED: Verify compatible release for SonarQube 2025.1 LTA before deploying.
+    # Check: https://github.com/vaulttec/sonar-auth-oidc/releases
+    # Replace <PLUGIN_VERSION> with the correct version number (e.g. 3.3.0).
+    plugins:
+      install:
+        - "https://github.com/vaulttec/sonar-auth-oidc/releases/download/v3.0.0/sonar-auth-oidc-plugin-3.0.0.jar"
+
+    # ================================
+    # Replica Configuration
+    # ================================
+    # Note: SonarQube Community supports single replica only
+    # For HA, Enterprise Edition is required
+    replicaCount: 1
+    
+    # ================================
+    # Resource Management
+    # ================================
+    # Memory: ~1.25x of JVM heap (Xmx=2g -> limit=3Gi)
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+        ephemeral-storage: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 3Gi
+        ephemeral-storage: 5Gi
+    
+    # ================================
+    # Security Context (Restricted PSS compliant)
+    # ================================
+    securityContext:
+      fsGroup: 0
+    
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 0
+      seccompProfile:
+        type: RuntimeDefault
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+    
+    # ================================
+    # Init Containers Configuration
+    # ================================
+    # Disable privileged init containers for restricted namespaces
+    initSysctl:
+      enabled: false
+    
+    initFs:
+      enabled: false
+    
+    # ================================
+    # Persistence Configuration
+    # ================================
+    persistence:
+      enabled: true
+      storageClass: "managed-premium-sc-tags"
+      accessMode: ReadWriteOnce
+      size: 50Gi
+    
+    # ================================
+    # PostgreSQL Configuration
+    # ================================
+    # Use external PostgreSQL database (production requirement)
+    postgresql:
+      enabled: false  # Disable embedded PostgreSQL
+    
+    # JDBC configuration for external database
+    jdbcOverwrite:
+      enabled: true
+      jdbcUrl: "jdbc:postgresql://sonarqube-postgresql.sonarqube.svc:5432/sonarqube"
+      jdbcUsername: sonarqube
+      jdbcSecretName: sonarqube-db-credentials
+      jdbcSecretPasswordKey: password
+    
+    # ================================
+    # Elasticsearch Configuration
+    # ================================
+    # SonarQube uses embedded Elasticsearch
+    elasticsearch:
+      configureNode: false  # Don't configure sysctls
+      bootstrapChecks: false
+    
+    # ================================
+    # Service Configuration
+    # ================================
+    service:
+      type: ClusterIP
+      externalPort: 9000
+      internalPort: 9000
+      labels:
+        app.kubernetes.io/component: sonarqube
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+    
+    # ================================
+    # Ingress Configuration
+    # ================================
+    ingress:
+      enabled: true
+      ingressClassName: webapprouting.kubernetes.azure.com
+      hosts:
+        - name: "sonarqube-contoso-dev.${domain_filter}"
+          path: /
+          pathType: Prefix
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+        nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+        nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+      tls:
+        - secretName: ssl-contoso-grp-com-tls
+          hosts:
+            - "sonarqube-contoso-dev.${domain_filter}"
+    
+    # ================================
+    # Health Probes
+    # ================================
+    livenessProbe:
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
+    
+    readinessProbe:
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+    
+    startupProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 60  # Allow up to 10 minutes startup
+    
+    # ================================
+    # JVM Options
+    # ================================
+    # Web process: 2GB heap (fits within 3GB limit)
+    # CE process: 512MB heap for compute engine
+    jvmOpts: "-Xmx2g -Xms1g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/opt/sonarqube/logs"
+    jvmCeOpts: "-Xmx512m -Xms256m -XX:+HeapDumpOnOutOfMemoryError"
+    
+    # ================================
+    # SonarQube Properties
+    # ================================
+    sonarProperties:
+      # Security
+      sonar.forceAuthentication: "true"
+      # Server URL for webhooks and email links
+      sonar.core.serverBaseURL: "https://sonarqube-contoso-dev.${domain_filter}"
+      # Logging configuration for log aggregation
+      sonar.log.level: "INFO"
+      sonar.log.jsonOutput: "true"
+      # Performance tuning
+      sonar.web.http.minThreads: "5"
+      sonar.web.http.maxThreads: "50"
+      sonar.ce.workerCount: "2"
+      # --------------------------------
+      # Entra ID OIDC Authentication (sonar-auth-oidc plugin)
+      # --------------------------------
+      # REQUIRED: Replace <TENANT_ID> with your Azure AD tenant ID.
+      # REQUIRED: Replace <CLIENT_ID> with the App Registration client ID.
+      # The client secret is injected via sonarSecretKey — NOT stored here.
+      #
+      # Group → Role mapping:
+      #   Contoso Admins (XXXXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX)
+      #     → Admin: Administer System + all global permissions
+      #   Contoso Devs   (XXXXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX)
+      #     → Editor: Browse + Execute Analysis + See Source Code + Create Issues
+      #
+      # Groups are synced JIT on every login via the 'groups' claim (cloud_displayname).
+      # Permission assignment to groups is done in the SonarQube admin UI after first login.
+      # See Day 2 instructions: Admin → Global Permissions + Permission Templates.
+      sonar.auth.oidc.enabled: "true"
+      # clientId and issuerId are injected via sonarSecretKey (sonarqube-oidc-credentials) from AKV
+      # to avoid secret scanner false positives on UUID patterns.
+      sonar.auth.oidc.scopes: "openid profile email"
+      sonar.auth.oidc.groupsSync: "true"
+      sonar.auth.oidc.groupsSync.claimName: "groups"
+      sonar.auth.oidc.loginStrategy: "Preferred Username"
+      sonar.auth.oidc.allowUsersToSignUp: "true"
+
+    # ================================
+    # Monitoring Passcode (for secure health checks)
+    # ================================
+    monitoringPasscodeSecretName: sonarqube-admin-credentials
+    monitoringPasscodeSecretKey: systemPasscode
+
+    # ================================
+    # OIDC Client Secret Injection
+    # ================================
+    # Mounts K8s secret 'sonarqube-oidc-credentials' as secret.properties
+    # into SonarQube at startup. Secret is managed by ExternalSecret from AKV.
+    # Format of the secret: sonar.auth.oidc.clientSecret=<value>
+    sonarSecretKey: sonarqube-oidc-credentials
+
+    # ================================
+    # Pod Affinity
+    # ================================
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: agentpool
+                  operator: In
+                  values:
+                    - infra
+    
+    # ================================
+    # Tolerations
+    # ================================
+    tolerations: []
+    
+    # ================================
+    # Service Account
+    # ================================
+    serviceAccount:
+      create: true
+      name: sonarqube
+      automountToken: false
+      annotations:
+        azure.workload.identity/client-id: ""
+    
+    # ================================
+    # Monitoring - Prometheus Integration
+    # ================================
+    prometheusExporter:
+      enabled: true
+      version: "0.17.2"
+      webBeanPort: 8000
+      ceBeanPort: 8001
+      config:
+        rules:
+          - pattern: ".*"
+    
+    prometheusMonitoring:
+      podMonitor:
+        enabled: true
+        namespace: sonarqube
+        interval: 30s
+        labels:
+          release: prometheus
+    
+    # ================================
+    # Termination Grace Period
+    # ================================
+    terminationGracePeriodSeconds: 120

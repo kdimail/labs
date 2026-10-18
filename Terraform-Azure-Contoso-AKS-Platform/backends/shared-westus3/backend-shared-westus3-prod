@@ -1,0 +1,6 @@
+storage_account_name = "ilcentralitsharedst"
+container_name       = "contoso-tfstate"
+key                  = "contoso-shared-il/contoso-shared-westus3-prod-aks-platform.tfstate"
+resource_group_name  = "ILCentral-LZ-IT-Shared-rg-deps"
+subscription_id      = "17068baa-da14-4718-8ffa-b27bdc0b10fb"
+use_azuread_auth     = true

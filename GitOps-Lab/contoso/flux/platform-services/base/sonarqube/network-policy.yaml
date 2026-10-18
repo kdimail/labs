@@ -1,0 +1,114 @@
+---
+# Network Policy for SonarQube - Ingress and Egress restrictions
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sonarqube
+  namespace: sonarqube
+spec:
+  podSelector:
+    matchLabels:
+      app: sonarqube
+  
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Allow from Azure Web Application Routing
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-routing-system
+      ports:
+        - protocol: TCP
+          port: 9000
+    
+    # Allow from kube-system (for ingress controllers)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 9000
+    
+    # Allow from Prometheus (monitoring namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 8000  # JMX exporter web bean
+        - protocol: TCP
+          port: 8001  # JMX exporter CE bean
+  
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    
+    # Allow PostgreSQL database access
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    
+    # Allow HTTPS for plugin downloads and license checks
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# Network Policy for PostgreSQL - allow only from SonarQube
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql
+  namespace: sonarqube
+spec:
+  podSelector:
+    matchLabels:
+      app: postgresql
+  
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Allow from SonarQube pods only
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sonarqube
+      ports:
+        - protocol: TCP
+          port: 5432
+  
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

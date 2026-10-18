@@ -1,0 +1,23 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base/westus3-prod/base-chart
+  - ../../base/westus3-prod/contoso-purchase-backend
+  - ../../base/westus3-prod/contoso-permission-backend
+  - ../../base/westus3-prod/contoso-lookuptables-backend
+  - ../../base/westus3-prod/contoso-workspace-backend
+  - ../../base/westus3-prod/contoso-comment-backend
+  - ../../base/westus3-prod/contoso-supplier-backend
+  - ../../base/westus3-prod/contoso-sales-backend
+  - ../../base/westus3-prod/contoso-logistics-backend
+  - ../../base/westus3-prod/contoso-manufacturing-backend
+  - ../../base/westus3-prod/contoso-exporttoexcel-worker
+  - ../../base/westus3-prod/contoso-workflow-backend
+  - ../../base/westus3-prod/contoso-finance-backend
+  - ../../base/westus3-prod/contoso-inventory-backend
+  - ../../base/westus3-prod/contoso-accessories-backend
+  - ../../base/westus3-prod/contoso-pricing-backend
+  - ../../base/westus3-prod/contoso-addresses-backend
+  - ../../base/westus3-prod/contoso-crm-backend

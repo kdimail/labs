@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline-performance
+  namespace: elastic-stack
+data:
+  api-performance-pipeline.conf: |
+    input {
+      http {
+        port => 5047
+        codec => "json"
+        max_content_length => 104857600
+      }
+    }
+    filter {
+      # Add any filter logic here if needed
+    }
+    output {
+      elasticsearch {
+        hosts => ["$${PRODUCTION_ES_HOSTS}"]
+        index => "contoso-performance-test-%{+YYYY.MM}"
+        user => "$${PRODUCTION_ES_USER}"
+        password => "$${PRODUCTION_ES_PASSWORD}"
+        ssl => true
+        cacert => "$${PRODUCTION_ES_SSL_CERTIFICATE_AUTHORITY}"
+      }
+    }

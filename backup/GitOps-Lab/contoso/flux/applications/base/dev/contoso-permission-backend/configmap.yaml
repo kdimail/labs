@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: permission-api-config
+  namespace: contoso
+  labels:
+    app: contoso-permission-backend
+    service: permission
+data:
+  CommandTelemetry__ActivitySourceName: Permission.Commands
+  CommandTelemetry__MeterName: Permission.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Permission.Backend
+  Logging__LogLevel__Contoso.Permission.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Permission.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: permissionService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Permission.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Permission.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Permission.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Permission.Backend.Infrastructure: Debug
+  AutomationBot__AllowedCompanies__0: "XZ"
+  AutomationBot__AllowedCompanies__1: "XX"
+  AutomationBot__AllowedCompanies__2: "ZZ"
+  AutomationBot__AllowedCompanies__3: "PX"
+  AutomationBot__AllowedCompanies__4: "WX"
+  AutomationBot__ServicePrincipalUser: "CONTOSOQA"
+  OpenId__AdditionalIssuers__0: "https://sts.windows.net/11111111-1111-1111-1111-111111111111/"
+  Cache__PermissionDetails__TTL: "300"
+  Cache__PermissionHeaders__TTL: "300"
+  Cache__Suppliers__TTL: "3600"
+  ExportOptions__DefaultDomainName: permission
+  Export__AllowedDomains__0: permission
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: "true"
+  Export__EnableExcelExport: "true"
+  Export__EnablePdfExport: "true"
+  Export__MaxExportSize: "50000"
+  FeatureFlags__EnableAdvancedFiltering: "true"
+  FeatureFlags__EnableBulkOperations: "true"
+  FeatureFlags__EnableExport: "true"
+  FeatureFlags__EnablePromiseDateAudit: "true"
+  ServiceBus__QueueName: excel-export-queue
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Api: Debug
+  # default true — fail-closed if AllowedCompanies is empty
+  TestCompanyGuard__Enabled: "false"

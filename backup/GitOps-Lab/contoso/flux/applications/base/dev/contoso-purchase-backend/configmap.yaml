@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: purchase-api-config
+  namespace: contoso
+  labels:
+    app: contoso-purchase-backend
+    service: purchase
+data:
+  CommandTelemetry__ActivitySourceName: Purchase.Commands
+  CommandTelemetry__MeterName: Purchase.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Purchase.Backend
+  Logging__LogLevel__Contoso.Purchase.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Purchase.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: purchaseService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Purchase.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Purchase.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Purchase.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Purchase.Backend.Infrastructure: Debug
+  Cache__PurchaseDetails__TTL: "300"
+  Cache__PurchaseHeaders__TTL: "300"
+  Cache__Suppliers__TTL: "3600"
+  ExportOptions__DefaultDomainName: purchase
+  Export__AllowedDomains__0: purchase
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: "true"
+  Export__EnableExcelExport: "true"
+  Export__EnablePdfExport: "true"
+  Export__MaxExportSize: "50000"
+  FeatureFlags__EnableAdvancedFiltering: "true"
+  FeatureFlags__EnableBulkOperations: "true"
+  FeatureFlags__EnableExport: "true"
+  FeatureFlags__EnablePromiseDateAudit: "true"
+  ServiceBus__QueueName: excel-export-queue
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Api: Debug

@@ -1,0 +1,6 @@
+storage_account_name = "ilcentralitsharedst"
+container_name       = "contoso-tfstate"
+key                  = "contoso-dev/contoso-dev-aks-platform.tfstate"
+resource_group_name  = "ILCentral-LZ-IT-Shared-rg-deps"
+subscription_id      = "${TF_VAR_IT_SHARED_SUBSCRIPTION_ID}"
+use_azuread_auth     = true

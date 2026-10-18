@@ -1,0 +1,20 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: centrifugo-config
+  namespace: centrifugo
+data:
+  config.json: |-
+    {
+      "admin": {"enabled": true},
+      "client": {
+        "allowed_origins": ["*"]
+      },
+      "channel": {
+        "namespaces": [
+          {"name": "export", "allow_subscribe_for_client": true}
+        ]
+      },
+      "engine": {"type": "memory"}
+    }

@@ -1,0 +1,40 @@
+---
+# Additional Ingress for WebStomp (message publishing over WebSockets)
+# This allows clients to publish/consume messages via HTTPS
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rabbitmq-webstomp
+  namespace: rabbitmq
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: rabbitmq
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  tls:
+    - hosts:
+        - rabbitmq-ws-contoso-shared-non-prod.${domain_filter}
+      secretName: rabbitmq-webstomp-tls
+  rules:
+    - host: rabbitmq-ws-contoso-shared-non-prod.${domain_filter}
+      http:
+        paths:
+          # WebStomp endpoint for message publishing
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: rabbitmq
+                port:
+                  number: 15674
+          # Web MQTT endpoint (alternative)
+          - path: /mqtt
+            pathType: Prefix
+            backend:
+              service:
+                name: rabbitmq
+                port:
+                  number: 15675
+

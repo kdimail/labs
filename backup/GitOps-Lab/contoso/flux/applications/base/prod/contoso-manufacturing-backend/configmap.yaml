@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: manufacturing-api-config
+  namespace: contoso
+  labels:
+    app: contoso-manufacturing-backend
+    service: manufacturing
+data:
+  CommandTelemetry__ActivitySourceName: Manufacturing.Commands
+  CommandTelemetry__MeterName: Manufacturing.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Manufacturing.Backend
+  Logging__LogLevel__Contoso.Manufacturing.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Manufacturing.Backend
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: manufacturingService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Manufacturing.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Manufacturing.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Manufacturing.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Manufacturing.Backend.Infrastructure: Debug
+  Serilog__MinimumLevel__Override__Contoso.Manufacturing.Backend.API: Information
+  Cache__manufacturingDetails__TTL: '300'
+  Cache__manufacturingHeaders__TTL: '300'
+  Cache__Suppliers__TTL: '3600'
+  ExportOptions__DefaultDomainName: manufacturing
+  Export__AllowedDomains__0: manufacturing
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: 'true'
+  Export__EnableExcelExport: 'true'
+  Export__EnablePdfExport: 'true'
+  Export__MaxExportSize: '50000'
+  FeatureFlags__EnableAdvancedFiltering: 'true'
+  FeatureFlags__EnableBulkOperations: 'true'
+  FeatureFlags__EnableExport: 'true'
+  FeatureFlags__EnablePromiseDateAudit: 'true'
+  ServiceBus__QueueName: excel-export-queue

@@ -1,0 +1,81 @@
+---
+# ConfigMap containing headlamp Helm values
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headlamp-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    replicaCount: 1
+    image:
+      repository: ghcr.io/headlamp-k8s/headlamp
+      tag: latest
+      pullPolicy: IfNotPresent
+    service:
+      type: ClusterIP
+      port: 80
+    ingress:
+      enabled: true
+      ingressClassName: webapprouting.kubernetes.azure.com    # adjust if using another ingress controller
+      hosts:
+        - host: "headlamp-contoso-swn-prod.contosogrp-cloud.com"
+          paths:
+            - path: /
+              type: ImplementationSpecific
+      tls:
+        - hosts:
+            - "headlamp-contoso-swn-prod.contosogrp-cloud.com"    # <<< CHANGE
+          secretName: ssl-contoso-grp-com-tls  # create TLS secret or use cert-manager
+
+    # OIDC (Azure Entra ID) configuration
+    # Using same app registration as Grafana (shared client ID/secret)
+    # All OIDC settings injected from ExternalSecret via HelmRelease valuesFrom
+    config:
+      sessionTTL: null
+      oidc:
+        # All values (clientID, clientSecret, issuerURL, validatorIssuerURL, validatorClientID, scopes) 
+        # are injected from ExternalSecret with tenant ID and client ID from Key Vault
+        useAccessToken: true
+
+    # Plugins via initContainer:
+    # This initContainer copies plugin files into /headlamp/plugins shared emptyDir volume before Headlamp starts.
+    initContainers:
+      - name: flux-plugin
+        image: ghcr.io/headlamp-k8s/headlamp-plugin-flux:v0.5.0
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args:
+          - "mkdir -p /headlamp/plugins && cp -r /plugins/* /headlamp/plugins/ && chown -R 100:101 /headlamp/plugins || true"
+        securityContext:
+          runAsNonRoot: false
+          privileged: false
+          runAsUser: 0
+          runAsGroup: 0
+        volumeMounts:
+          - mountPath: /headlamp/plugins
+            name: headlamp-plugins
+
+    volumes:
+      - name: headlamp-plugins
+        emptyDir: {}
+
+    volumeMounts:
+      - mountPath: /headlamp/plugins
+        name: headlamp-plugins
+
+    # RBAC: chart ships with sane defaults; increase if needed
+    rbac:
+      create: true
+
+    # resources / nodeAffinity / tolerations - optional tuning
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # imagePullSecrets if you need to pull plugin or headlamp image from private registry
+    imagePullSecrets: []

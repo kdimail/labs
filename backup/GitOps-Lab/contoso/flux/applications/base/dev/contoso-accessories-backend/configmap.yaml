@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: accessories-api-config
+  namespace: contoso
+  labels:
+    app: contoso-accessories-backend
+    service: accessories
+data:
+  CommandTelemetry__ActivitySourceName: Accessories.Commands
+  CommandTelemetry__MeterName: Accessories.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Accessories.Backend
+  Logging__LogLevel__Contoso.Accessories.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Accessories.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: accessoriesService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Accessories.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Accessories.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Accessories.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Accessories.Backend.Infrastructure: Debug

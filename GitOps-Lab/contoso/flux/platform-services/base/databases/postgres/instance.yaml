@@ -1,0 +1,43 @@
+apiVersion: postgres.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: contoso-postgres
+  namespace: contoso
+spec:
+  instances: 1
+  storage:
+    size: 10Gi
+    storageClassName: managed-premium-sc-tags
+  postgresql:
+    version: "16"
+    parameters:
+      max_connections: "200"
+      shared_buffers: "256MB"
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+  managed:
+    services:
+      additional:
+        - selectorType: rw
+          serviceTemplate:
+            metadata:
+              name: contoso-postgres-lb
+              annotations:
+                service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+            spec:
+              type: LoadBalancer
+
+  bootstrap:
+    initdb:
+      database: contosodb
+      user: pgadm
+      passwordSecretRef:
+        name: contoso-postgres-secret
+        key: contoso-password

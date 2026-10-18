@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: apm-fleet-integration-install
+  namespace: elastic-stack
+  labels:
+    app: apm-setup
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 20
+  template:
+    metadata:
+      labels:
+        app: apm-setup
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: install-apm-integration
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              BASE="https://production-kb-kb-http.elastic-stack.svc:5601"
+              AUTH="elastic:$(printenv ELASTIC_PASSWORD)"
+
+              echo "Waiting for Kibana API to be reachable..."
+              while true; do
+                CODE=$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 -u "$AUTH" "$BASE/api/status")
+                echo "Kibana status code: $CODE"
+                if [ "$CODE" = "200" ] || [ "$CODE" = "503" ]; then
+                  break
+                fi
+                echo "Not reachable yet, retrying in 15s..."
+                sleep 15
+              done
+              echo "Kibana is reachable."
+
+              echo "Checking if APM integration is already installed..."
+              INSTALLED=$(curl -k -s --max-time 30 -u "$AUTH" "$BASE/api/fleet/epm/packages/apm" \
+                | grep -o '"status":"[^"]*"' | head -1)
+              echo "Current status: $INSTALLED"
+              if echo "$INSTALLED" | grep -q "installed"; then
+                echo "APM integration already installed, skipping."
+                exit 0
+              fi
+
+              echo "Installing APM Fleet integration..."
+              RESPONSE=$(curl -k -s --max-time 120 -w "\n%{http_code}" \
+                -X POST \
+                -u "$AUTH" \
+                -H "kbn-xsrf: true" \
+                -H "Content-Type: application/json" \
+                "$BASE/api/fleet/epm/packages/apm" \
+                -d '{"force": true}')
+
+              HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+              BODY=$(echo "$RESPONSE" | head -1)
+              echo "Response code: $HTTP_CODE"
+              echo "Response body: $BODY"
+
+              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+                echo "APM integration installed successfully."
+              else
+                echo "Failed to install APM integration (HTTP $HTTP_CODE), will retry."
+                exit 1
+              fi
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: production-es-es-elastic-user
+                  key: elastic

@@ -1,0 +1,230 @@
+---
+# Network policy for Elasticsearch - allow from Kibana, Logstash, APM, Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elasticsearch
+  namespace: elastic-stack
+spec:
+  podSelector:
+    matchLabels:
+      elasticsearch.k8s.elastic.co/cluster-name: production-es
+  
+  policyTypes:
+    - Ingress
+  
+  ingress:
+    # Allow from Kibana
+    - from:
+        - podSelector:
+            matchLabels:
+              kibana.k8s.elastic.co/name: production-kb
+      ports:
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9300
+    
+    # Allow from Logstash
+    - from:
+        - podSelector:
+            matchLabels:
+              logstash.k8s.elastic.co/name: production-ls
+      ports:
+        - protocol: TCP
+          port: 9200
+    
+    # Allow from APM Server
+    - from:
+        - podSelector:
+            matchLabels:
+              apm.k8s.elastic.co/name: production-apm
+      ports:
+        - protocol: TCP
+          port: 9200
+    
+    # Allow Elasticsearch inter-node communication
+    - from:
+        - podSelector:
+            matchLabels:
+              elasticsearch.k8s.elastic.co/cluster-name: production-es
+      ports:
+        - protocol: TCP
+          port: 9300
+    
+    # Allow from Prometheus (monitoring namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9200
+    
+    # Allow from ILM setup job (same namespace)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: elasticsearch-setup
+      ports:
+        - protocol: TCP
+          port: 9200
+
+    # Allow from the ECK operator itself (health/license/reconciliation checks)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: elastic-system
+      ports:
+        - protocol: TCP
+          port: 9200
+
+---
+# Network policy for Kibana - allow from Ingress and Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kibana
+  namespace: elastic-stack
+spec:
+  podSelector:
+    matchLabels:
+      kibana.k8s.elastic.co/name: production-kb
+  
+  policyTypes:
+    - Ingress
+  
+  ingress:
+    # Allow from Azure Web Application Routing (app-routing-system namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-routing-system
+      ports:
+        - protocol: TCP
+          port: 5601
+    
+    # Allow from kube-system (for Azure ingress controllers)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 5601
+    
+    # Allow from Prometheus (monitoring namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 5601
+    
+    # Allow from index pattern setup job and APM integration install job (same namespace)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: kibana-setup
+        - podSelector:
+            matchLabels:
+              app: apm-setup
+      ports:
+        - protocol: TCP
+          port: 5601
+
+---
+# Network policy for APM Server - allow from Ingress, applications, and Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apm-server
+  namespace: elastic-stack
+spec:
+  podSelector:
+    matchLabels:
+      apm.k8s.elastic.co/name: production-apm
+  
+  policyTypes:
+    - Ingress
+  
+  ingress:
+    # Allow from Azure Web Application Routing
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-routing-system
+      ports:
+        - protocol: TCP
+          port: 8200
+    
+    # Allow from kube-system (for Azure ingress controllers)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8200
+    
+    # Allow from all namespaces for APM agents (applications)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8200
+        - protocol: TCP
+          port: 14250  # Jaeger gRPC
+        - protocol: TCP
+          port: 14268  # Jaeger HTTP
+
+---
+# Network policy for Logstash - allow from Fluent Bit, Beats, and Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logstash
+  namespace: elastic-stack
+spec:
+  podSelector:
+    matchLabels:
+      logstash.k8s.elastic.co/name: production-ls
+  
+  policyTypes:
+    - Ingress
+  
+  ingress:
+    # Allow Beats input from all namespaces (Fluent Bit, Filebeat, etc.)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5044
+    
+    # Allow HTTP input from all namespaces (Fluent Bit HTTP output)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    
+    # Allow from all namespaces (pipeline ports)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5045
+        - protocol: TCP
+          port: 5046
+        - protocol: TCP
+          port: 5047
+    
+    # Allow from Prometheus (monitoring namespace)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9600

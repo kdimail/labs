@@ -1,0 +1,189 @@
+# Default values for base-microservice chart
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Application name (will be used for resource naming)
+nameOverride: ""
+fullnameOverride: ""
+
+# Number of replicas (ignored once autoscaling.enabled is true - HPA owns replica count then)
+replicaCount: 1
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 75
+
+image:
+  # Container registry
+  registry: ""
+  # Image repository
+  repository: ""
+  # Image tag (retained for human readability and traceability)
+  tag: ""
+  # Image digest (sha256:...). When set, Kubernetes pins deployment to this
+  # exact image layer — the tag is stored for reference only and ignored by K8s.
+  digest: ""
+  # Image pull policy
+  pullPolicy: Always
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Pod-level ServiceAccount (e.g. for Azure Workload Identity federation) — empty uses the namespace's "default" ServiceAccount
+serviceAccountName: ""
+
+# Service configuration
+service:
+  # Service type (ClusterIP, NodePort, LoadBalancer)
+  type: ClusterIP
+  # Service port
+  port: 80
+  # Target port on the container
+  targetPort: 80
+  # Protocol
+  protocol: TCP
+  # Service annotations
+  annotations: {}
+  # Service labels
+  labels: {}
+
+# Deployment configuration
+deployment:
+  # Scheduler name
+  schedulerName: default-scheduler
+  # Deployment annotations
+  annotations: {}
+  # Pod labels
+  podLabels: {}
+  # Pod annotations
+  podAnnotations: {}
+
+# Container port
+containerPort: 80
+
+# Health probes
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /health/startup
+    port: 80
+  initialDelaySeconds: 0
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /health/live
+    port: 80
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /health/ready
+    port: 80
+  initialDelaySeconds: 0
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Ingress configuration
+ingress:
+  # Enable ingress resource
+  enabled: false
+  # Ingress class name (e.g., nginx, traefik)
+  ingressClassName: "webapprouting.kubernetes.azure.com"
+  # Ingress annotations — mandatory nginx annotations applied to every ingress.
+  # Override or extend per-service in the HelmRelease values.
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+  # Ingress labels
+  labels: {}
+  # Ingress hosts
+  hosts: []
+    # - host: example.local
+    #   paths:
+    #     - path: /
+    #       pathType: Prefix
+    #       port: 80  # optional, defaults to service.port
+  # TLS configuration
+  tls:
+    # Enable TLS (optional, enabled by default)
+    enabled: true
+    # TLS entries — each references a pre-existing Secret (or one managed by cert-manager)
+    entries:
+      - secretName: ssl-contoso-grp-com-tls
+        hosts:
+          - example.local
+
+# Environment variables
+env:
+  # Static environment variables
+  # Example:
+  # - name: MY_VAR
+  #   value: "my-value"
+  []
+
+# Environment variables from secrets
+envFromSecrets:
+  # Example:
+  # - name: MY_SECRET_VAR
+  #   secretName: my-secret
+  #   secretKey: my-key
+  []
+
+# Environment variables from ConfigMap
+envFrom:
+  # ConfigMap references
+  configMapRef: []
+    # Example:
+    # - name: app-config
+
+# Resources (CPU/Memory)
+resources: {}
+  # limits:
+  #   cpu: 500m
+  #   memory: 512Mi
+  # requests:
+  #   cpu: 250m
+  #   memory: 256Mi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Security context for the pod
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# Security context for the container
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+# Extra init containers - e.g. building a custom CA bundle before the app starts
+initContainers: []

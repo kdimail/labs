@@ -1,0 +1,131 @@
+# ---
+# # PrometheusRules for SonarQube Alerting
+# apiVersion: monitoring.coreos.com/v1
+# kind: PrometheusRule
+# metadata:
+#   name: sonarqube-alerts
+#   namespace: sonarqube
+#   labels:
+#     app: sonarqube
+#     release: prometheus
+# spec:
+#   groups:
+#     - name: sonarqube.rules
+#       rules:
+#         # SonarQube Pod Availability
+#         - alert: SonarQubeDown
+#           expr: |
+#             absent(up{job="sonarqube"} == 1)
+#           for: 5m
+#           labels:
+#             severity: critical
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube is down"
+#             description: "SonarQube has been down for more than 5 minutes."
+#             runbook_url: "https://docs.sonarsource.com/sonarqube-server/latest/setup-and-upgrade/operating-the-server/"
+        
+#         # SonarQube High Memory Usage
+#         - alert: SonarQubeHighMemoryUsage
+#           expr: |
+#             (container_memory_working_set_bytes{namespace="sonarqube", container="sonarqube"} 
+#             / container_spec_memory_limit_bytes{namespace="sonarqube", container="sonarqube"}) * 100 > 85
+#           for: 10m
+#           labels:
+#             severity: warning
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube high memory usage"
+#             description: "SonarQube memory usage is above 85% for more than 10 minutes. Current: {{ $value | printf \"%.1f\" }}%"
+        
+#         # SonarQube High CPU Usage
+#         - alert: SonarQubeHighCPUUsage
+#           expr: |
+#             (rate(container_cpu_usage_seconds_total{namespace="sonarqube", container="sonarqube"}[5m]) 
+#             / container_spec_cpu_quota{namespace="sonarqube", container="sonarqube"} * 100000) > 80
+#           for: 15m
+#           labels:
+#             severity: warning
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube high CPU usage"
+#             description: "SonarQube CPU usage is above 80% for more than 15 minutes."
+        
+#         # SonarQube Pod Restarts
+#         - alert: SonarQubePodRestarts
+#           expr: |
+#             increase(kube_pod_container_status_restarts_total{namespace="sonarqube", container="sonarqube"}[1h]) > 3
+#           for: 5m
+#           labels:
+#             severity: warning
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube pod restarting frequently"
+#             description: "SonarQube pod has restarted {{ $value | printf \"%.0f\" }} times in the last hour."
+        
+#         # SonarQube Persistent Volume Usage
+#         - alert: SonarQubePVCUsageHigh
+#           expr: |
+#             (kubelet_volume_stats_used_bytes{namespace="sonarqube", persistentvolumeclaim=~".*sonarqube.*"} 
+#             / kubelet_volume_stats_capacity_bytes{namespace="sonarqube", persistentvolumeclaim=~".*sonarqube.*"}) * 100 > 80
+#           for: 15m
+#           labels:
+#             severity: warning
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube PVC usage high"
+#             description: "SonarQube persistent volume usage is above 80%. Current: {{ $value | printf \"%.1f\" }}%"
+        
+#         # SonarQube Persistent Volume Critical
+#         - alert: SonarQubePVCUsageCritical
+#           expr: |
+#             (kubelet_volume_stats_used_bytes{namespace="sonarqube", persistentvolumeclaim=~".*sonarqube.*"} 
+#             / kubelet_volume_stats_capacity_bytes{namespace="sonarqube", persistentvolumeclaim=~".*sonarqube.*"}) * 100 > 90
+#           for: 5m
+#           labels:
+#             severity: critical
+#             service: sonarqube
+#           annotations:
+#             summary: "SonarQube PVC usage critical"
+#             description: "SonarQube persistent volume usage is above 90%. Immediate action required!"
+
+#     - name: sonarqube-postgresql.rules
+#       rules:
+#         # PostgreSQL Down
+#         - alert: SonarQubePostgreSQLDown
+#           expr: |
+#             absent(up{job="sonarqube-postgresql"} == 1) or 
+#             kube_pod_status_ready{namespace="sonarqube", pod=~"sonarqube-postgresql.*"} == 0
+#           for: 5m
+#           labels:
+#             severity: critical
+#             service: sonarqube-postgresql
+#           annotations:
+#             summary: "SonarQube PostgreSQL is down"
+#             description: "SonarQube PostgreSQL database has been down for more than 5 minutes."
+        
+#         # PostgreSQL High Memory
+#         - alert: SonarQubePostgreSQLHighMemory
+#           expr: |
+#             (container_memory_working_set_bytes{namespace="sonarqube", container="postgresql"} 
+#             / container_spec_memory_limit_bytes{namespace="sonarqube", container="postgresql"}) * 100 > 85
+#           for: 10m
+#           labels:
+#             severity: warning
+#             service: sonarqube-postgresql
+#           annotations:
+#             summary: "SonarQube PostgreSQL high memory usage"
+#             description: "PostgreSQL memory usage is above 85%. Current: {{ $value | printf \"%.1f\" }}%"
+        
+#         # PostgreSQL Storage Usage
+#         - alert: SonarQubePostgreSQLStorageHigh
+#           expr: |
+#             (kubelet_volume_stats_used_bytes{namespace="sonarqube", persistentvolumeclaim=~"data-sonarqube-postgresql.*"} 
+#             / kubelet_volume_stats_capacity_bytes{namespace="sonarqube", persistentvolumeclaim=~"data-sonarqube-postgresql.*"}) * 100 > 80
+#           for: 15m
+#           labels:
+#             severity: warning
+#             service: sonarqube-postgresql
+#           annotations:
+#             summary: "SonarQube PostgreSQL storage high"
+#             description: "PostgreSQL storage usage is above 80%. Current: {{ $value | printf \"%.1f\" }}%"

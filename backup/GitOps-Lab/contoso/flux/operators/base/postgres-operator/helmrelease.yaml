@@ -1,0 +1,23 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: postgres-operator
+  namespace: flux-system
+spec:
+  interval: 1m
+  targetNamespace: cnpg-system
+  timeout: 5m0s
+  chart:
+    spec:
+      chart: cloudnative-postgres
+      version: "1.x"  # Specify the chart version if needed
+      sourceRef:
+        kind: HelmRepository
+        name: cloudnative-postgres-helm-repo
+        namespace: flux-system
+      interval: 1m
+  valuesFrom:
+    - kind: ConfigMap
+      name: postgres-operator-values
+      valuesKey: values.yaml

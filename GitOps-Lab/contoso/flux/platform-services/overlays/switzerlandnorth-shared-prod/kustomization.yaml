@@ -1,0 +1,28 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base/reloader
+  - ../../base/secret-stores
+  - ../../base/tls-wild-cluster-external-secret.yaml
+  - ../../base/values/values-fluent-bit-contoso-swn-shared-prod.yaml
+  - ../../base/fluent-bit
+  - ../../base/values/values-monitoring-contoso-swn-shared-prod.yaml
+  - ../../base/monitoring/externalsecret.yaml
+  - ../../base/monitoring
+  - ../../base/ingresses/ingress-apm-swn-shared-prod.yaml
+  - ../../base/ingresses/ingress-kibana-swn-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-logs-swn-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-performance-swn-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-apitest-swn-shared-prod.yaml
+  - ../../base/ingresses/ingress-otel-swn-shared-prod.yaml
+  - ../../base/elastic-stack
+  - ../../base/elastic-stack/elasticsearch-shared-prod.yaml
+  - ../../base/elastic-stack/logstash-shared-prod.yaml
+  - ../../base/elastic-stack/kibana-swn-shared-prod.yaml
+  - ../../base/elastic-stack/apm-server-shared-prod.yaml
+  - ../../base/elastic-stack/ilm-setup-contoso-logs-prod-job.yaml
+  - ../../base/values/values-otel-collector-swn-shared-prod.yaml
+  - ../../base/otel-collector
+  - ../../base/netshoot/netshoot-deployment.yaml

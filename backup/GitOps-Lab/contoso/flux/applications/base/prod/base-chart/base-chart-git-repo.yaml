@@ -1,0 +1,13 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: base-helm-chart
+  namespace: contoso
+spec:
+  interval: 1m
+  url: ssh://git@github.com/CONTOSO-GRP/base-helm-chart.git
+  ref:
+    branch: main
+  secretRef:
+    name: git-creds

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exporttoexcel-api-config
+  namespace: contoso
+  labels:
+    app: contoso-exporttoexcel-worker
+    service: exporttoexcel
+data:
+  CommandTelemetry__ActivitySourceName: Exporttoexcel.Commands
+  CommandTelemetry__MeterName: Exporttoexcel.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.ExportToExcel.Worker
+  Logging__LogLevel__Contoso.ExportToExcel.Worker: Information
+  OpenTelemetry__ServiceName: Contoso.ExportToExcel.Worker
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: exportToExcelWorker
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.ExportToExcel.Worker
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Api: Information
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Application: Information
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Infrastructure: Information
+  Export__BlobContainerName: "export-to-excel"
+  Export__MaxRowsLimit: "100000"
+  Export__BatchSize: "5000"
+  Export__MaxFileSizeMb: "200"
+  Export__HttpTimeoutSeconds: "90"
+  Export__WebhookTimeoutSeconds: "30"
+  Export__MaxRetries: "3"
+  Export__CircuitBreakerThreshold: "10"
+  Export__CircuitBreakerDurationSeconds: "60"
+  Export__MaxConsecutiveEmptyPages: "3"
+  Export__MaxPaginationIterations: "1000"
+  Export__MaxExecutionTimeMinutes: "15"
+  Export__MaxAutoLockRenewalMinutes: "20"
+  # Export settings - configurable without redeployment 
+  Export__MaxConcurrentCalls: "3"
+  # Service Bus
+  ServiceBus__QueueName: "excel-export-queue"
+  Export__CentrifugoApiUrl: http://centrifugo.centrifugo.svc.cluster.local:9000/api/publish
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker: Information
+  Export__AllowedWebhookHosts: "contoso-companies.com,contoso-grp.com"
+  # OpenTelemetry
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "ExportToExcel.Worker"

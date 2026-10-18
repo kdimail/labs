@@ -1,0 +1,43 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: centrifugal
+  namespace: centrifugo
+spec:
+  interval: 24h
+  url: https://centrifugal.github.io/helm-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: centrifugo
+  namespace: centrifugo
+spec:
+  interval: 10m
+  serviceAccountName: centrifugo
+  targetNamespace: centrifugo
+  install:
+    createNamespace: false
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  chart:
+    spec:
+      chart: centrifugo
+      version: "13.0.0"
+      sourceRef:
+        kind: HelmRepository
+        name: centrifugal
+        namespace: centrifugo
+      interval: 87600h
+  values:
+    fullnameOverride: "centrifugo"
+    existingConfigmap: centrifugo-config
+    existingSecret: centrifugo-secrets
+    env:
+      CENTRIFUGO_CLIENT_TOKEN_HMAC_ALGORITHM: "HS256"
+      CENTRIFUGO_ALLOW_INSECURE_TOKEN_ALGORITHMS: "true"

@@ -1,0 +1,480 @@
+# =============================================================================
+# Terraform Deployment Pipeline
+# =============================================================================
+# This workflow handles Terraform deployments across all environments
+# Triggered manually via workflow_dispatch
+# =============================================================================
+
+name: Terraform Deploy
+run-name: "Terraform Deploy - ${{ github.event.inputs.environment }} - ${{ github.event.inputs.region }} - ${{ github.event.inputs.action }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - shared-il
+          - dev
+          - qa
+          - shared-swn
+          - shared-westus3
+          - prod-swn
+          - prod-westus3
+      region:
+        description: "Target region (il for non-prod, ne/jpe/eu for prod)"
+        required: true
+        default: "il"
+        type: choice
+        options:
+          - il
+          - swn
+          - wus3
+      action:
+        description: "Terraform action to perform"
+        required: true
+        type: choice
+        default: "plan"
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  TF_VERSION: "1.14.7"
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  # ===========================================================================
+  # Validation Job
+  # ===========================================================================
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      tfvars_file: ${{ steps.resolve-paths.outputs.tfvars_file }}
+      backend_file: ${{ steps.resolve-paths.outputs.backend_file }}
+      env_name: ${{ steps.resolve-paths.outputs.env_name }}
+
+    steps:
+      - name: Validate environment and region combination
+        id: validate
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          REGION="${{ github.event.inputs.region }}"
+
+          echo "🔍 Validating environment: $ENVIRONMENT with region: $REGION"
+
+          # Validate region constraints
+          case "$ENVIRONMENT" in
+            dev|qa)
+              if [[ "$REGION" != "il" ]]; then
+                echo "❌ Error: Non-production environments (dev, qa) only support region 'il'"
+                echo "   Received: region='$REGION' for environment='$ENVIRONMENT'"
+                exit 1
+              fi
+              ;;
+            prod)
+              if [[ ! "$REGION" =~ ^(swn|wus3)$ ]]; then
+                echo "❌ Error: Production environment supports regions: swn, wus3 (no prod-il)"
+                echo "   Received: region='$REGION'"
+                exit 1
+              fi
+              ;;
+            shared-il)
+              if [[ "$REGION" != "il" ]]; then
+                echo "❌ Error: shared-il environment only supports region 'il'"
+                exit 1
+              fi
+              ;;
+            shared-swn)
+              if [[ "$REGION" != "swn" ]]; then
+                echo "❌ Error: shared-swn environment only supports region 'swn'"
+                exit 1
+              fi
+              ;;
+            prod-swn)
+              if [[ "$REGION" != "swn" ]]; then
+                echo "❌ Error: prod-swn environment only supports region 'swn'"
+                exit 1
+              fi
+              ;;
+            shared-westus3)
+              if [[ "$REGION" != "wus3" ]]; then
+                echo "❌ Error: shared-westus3 environment only supports region 'wus3'"
+                exit 1
+              fi
+              ;;
+            prod-westus3)
+              if [[ "$REGION" != "wus3" ]]; then
+                echo "❌ Error: prod-westus3 environment only supports region 'wus3'"
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "✅ Validation passed"
+
+      - name: Resolve file paths
+        id: resolve-paths
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          REGION="${{ github.event.inputs.region }}"
+
+          # Determine env_name for subscription secret lookup
+          case "$ENVIRONMENT" in
+            dev)
+              ENV_NAME="DEV"
+              TFVARS_FILE="tfvars/dev/dev-${REGION}.tfvars"
+              BACKEND_FILE="backends/dev/backend-${REGION}"
+              ;;
+            qa)
+              ENV_NAME="QA"
+              TFVARS_FILE="tfvars/qa/qa-${REGION}.tfvars"
+              BACKEND_FILE="backends/qa/backend-${REGION}"
+              ;;
+            shared-il)
+              ENV_NAME="SHARED_IL"
+              TFVARS_FILE="tfvars/shared-il/shared-il-non-prod.tfvars"
+              BACKEND_FILE="backends/shared-il/backend-non-prod"
+              ;;
+            shared-swn)
+              ENV_NAME="SHARED_SWN"
+              TFVARS_FILE="tfvars/shared-swn/shared-swn-prod.tfvars"
+              BACKEND_FILE="backends/shared-swn/backend-shared-swn-prod"
+              ;;
+            prod-swn)
+              ENV_NAME="PROD_SWN"
+              TFVARS_FILE="tfvars/prod-swn/swn-prod.tfvars"
+              BACKEND_FILE="backends/prod-swn/backend-swn-prod"
+              ;;
+            shared-westus3)
+              ENV_NAME="SHARED_WESTUS3"
+              TFVARS_FILE="tfvars/shared-westus3/shared-westus3-prod.tfvars"
+              BACKEND_FILE="backends/shared-westus3/backend-shared-westus3-prod"
+              ;;
+            prod-westus3)
+              ENV_NAME="PROD_WESTUS3"
+              TFVARS_FILE="tfvars/prod-westus3/westus3-prod.tfvars"
+              BACKEND_FILE="backends/prod-westus3/backend-westus3-prod"
+              ;;
+          esac
+
+          echo "📁 Resolved paths:"
+          echo "   TFVARS_FILE: $TFVARS_FILE"
+          echo "   BACKEND_FILE: $BACKEND_FILE"
+          echo "   ENV_NAME: $ENV_NAME"
+
+          echo "tfvars_file=$TFVARS_FILE" >> $GITHUB_OUTPUT
+          echo "backend_file=$BACKEND_FILE" >> $GITHUB_OUTPUT
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+
+  # ===========================================================================
+  # Terraform Job
+  # ===========================================================================
+  terraform:
+    name: Terraform ${{ github.event.inputs.action }}
+    needs: validate
+    runs-on: ["self-hosted", "azure", "Region:il"]
+    environment: ${{ github.event.inputs.environment }}
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.TERRAFORM_AZURE_SP_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.TERRAFORM_AZURE_SP_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.TERRAFORM_AZURE_TENANT_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Terraform-Azure-Modules
+        uses: actions/checkout@v4
+        with:
+          repository: CONTOSO-GRP/Terraform-Azure-Modules
+          token: ${{ secrets.GH_TF_MODULES_TOKEN }} # afeef-iscar PAT (repo level secret)
+          path: terraform-azure-lz-modules
+
+      - name: Resolve Subscription ID
+        id: subscription
+        env:
+          # All subscription IDs are passed as env vars (no PROD_IL - doesn't exist)
+          SUBSCRIPTION_ID_DEV: ${{ secrets.TF_SUB_ID_CONTOSO_DEV }}
+          SUBSCRIPTION_ID_QA: ${{ secrets.TF_SUB_ID_CONTOSO_QA }}
+          SUBSCRIPTION_ID_SHARED_IL: ${{ secrets.TF_SUB_ID_CONTOSO_SHARED }}
+
+          SUBSCRIPTION_ID_PROD_SWN: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+          SUBSCRIPTION_ID_PROD_WUS3: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+          SUBSCRIPTION_ID_PROD_WESTUS3: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+
+          SUBSCRIPTION_ID_SHARED_SWN: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+          SUBSCRIPTION_ID_SHARED_WUS3: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+          SUBSCRIPTION_ID_SHARED_WESTUS3: ${{ secrets.TF_SUB_ID_CONTOSO_PROD }}
+          ENV_NAME: ${{ needs.validate.outputs.env_name }}
+        run: |
+          echo "🔑 Resolving subscription ID for environment: $ENV_NAME"
+
+          # Dynamically get the subscription ID based on env_name
+          SECRET_VAR_NAME="SUBSCRIPTION_ID_${ENV_NAME}"
+          SUBSCRIPTION_ID="${!SECRET_VAR_NAME}"
+
+          if [[ -z "$SUBSCRIPTION_ID" ]]; then
+            echo "❌ Error: Subscription ID not found for: $SECRET_VAR_NAME"
+            echo "   Please ensure the secret is configured in GitHub repository settings"
+            exit 1
+          fi
+
+          echo "✅ Subscription ID resolved successfully for $ENV_NAME"
+
+          # Mask the subscription ID in logs
+          echo "::add-mask::$SUBSCRIPTION_ID"
+          echo "subscription_id=$SUBSCRIPTION_ID" >> $GITHUB_OUTPUT
+          echo "TF_VAR_subscription_id=$SUBSCRIPTION_ID" >> $GITHUB_ENV
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.TERRAFORM_AZURE_SP_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.TERRAFORM_AZURE_SP_CLIENT_SECRET }}",
+              "subscriptionId": "${{ steps.subscription.outputs.subscription_id }}",
+              "tenantId": "${{ secrets.TERRAFORM_AZURE_TENANT_ID }}"
+            }
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Verify required files exist
+        run: |
+          TFVARS_FILE="${{ needs.validate.outputs.tfvars_file }}"
+          BACKEND_FILE="${{ needs.validate.outputs.backend_file }}"
+
+          echo "📂 Checking required files..."
+
+          if [[ ! -f "$TFVARS_FILE" ]]; then
+            echo "❌ Error: tfvars file not found: $TFVARS_FILE"
+            exit 1
+          fi
+          echo "✅ Found: $TFVARS_FILE"
+
+          if [[ ! -f "$BACKEND_FILE" ]]; then
+            echo "❌ Error: backend file not found: $BACKEND_FILE"
+            exit 1
+          fi
+          echo "✅ Found: $BACKEND_FILE"
+
+      - name: Process tfvars with envsubst
+        id: envsubst
+        env:
+          # TF_VAR_subscription_id: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_IT_SHARED_SUBSCRIPTION_ID: ${{ secrets.TF_SUB_ID_IT_SHARED }}
+          TF_VAR_CONTOSO_SHARED_NON_PROD_SUBSCRIPTION_ID: ${{ secrets.TF_SUB_ID_CONTOSO_SHARED }}
+          TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD: ${{ secrets.TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD }}
+          TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_PROD: ${{ secrets.TERRAFORM_AZURE_RUNNER_MNG_ID_PROD }}
+          TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD2: ${{ secrets.TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD2 }}
+          TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_PROD2: ${{ secrets.TERRAFORM_AZURE_RUNNER_MNG_ID_PROD2 }}
+          TF_VAR_subscription_aks_id: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_TERRAFORM_AZURE_CONTOSO_ADMINS_GROUP_ID: ${{ secrets.TERRAFORM_AZURE_CONTOSO_ADMINS_GROUP_ID }}
+          TF_VAR_TERRAFORM_AZURE_CONTOSO_DEVS_GROUP_ID: ${{ secrets.TERRAFORM_AZURE_CONTOSO_DEVS_GROUP_ID }}
+          TF_VAR_TERRAFORM_AZURE_CONTOSO_GALWEB_DEVS_GROUP_ID: ${{ secrets.TERRAFORM_AZURE_CONTOSO_GALWEB_DEVS_GROUP_ID }}
+          TF_VAR_TERRAFORM_AZURE_CONTOSO_TESTING_SP: ${{ secrets.TERRAFORM_AZURE_CONTOSO_TESTING_SP }}
+        run: |
+          TFVARS_FILE="${{ needs.validate.outputs.tfvars_file }}"
+          PROCESSED_TFVARS="processed.tfvars"
+          BACKEND_FILE="${{ needs.validate.outputs.backend_file }}"
+          PROCESSED_BACKEND="processed_backend"
+
+          echo "🔄 Processing tfvars file with envsubst..."
+          echo "   Source: $TFVARS_FILE"
+          echo "   Output: $PROCESSED_TFVARS"
+
+          # Use envsubst to substitute environment variables
+          # Only substitute TF_VAR_subscription_id to avoid unintended replacements
+          envsubst '${TF_VAR_subscription_aks_id} ${TF_VAR_IT_SHARED_SUBSCRIPTION_ID} ${TF_VAR_CONTOSO_SHARED_NON_PROD_SUBSCRIPTION_ID} ${TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD} ${TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_PROD} ${TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_NON_PROD2} ${TF_VAR_TERRAFORM_AZURE_RUNNER_MNG_ID_PROD2} ${TF_VAR_TERRAFORM_AZURE_CONTOSO_ADMINS_GROUP_ID} ${TF_VAR_TERRAFORM_AZURE_CONTOSO_DEVS_GROUP_ID} ${TF_VAR_TERRAFORM_AZURE_CONTOSO_GALWEB_DEVS_GROUP_ID} ${TF_VAR_TERRAFORM_AZURE_CONTOSO_TESTING_SP}' < "$TFVARS_FILE" > "$PROCESSED_TFVARS"
+          envsubst '${TF_VAR_IT_SHARED_SUBSCRIPTION_ID}' < "$BACKEND_FILE" > "$PROCESSED_BACKEND"
+
+          echo "✅ Tfvars&Backend processed successfully"
+          echo "processed_tfvars=$PROCESSED_TFVARS" >> $GITHUB_OUTPUT
+          echo "processed_backend=$PROCESSED_BACKEND" >> $GITHUB_OUTPUT
+
+          # Show diff for debugging (masking subscription ID)
+          echo "📝 Changes applied:"
+          diff "$TFVARS_FILE" "$PROCESSED_TFVARS" || true
+          diff "$BACKEND_FILE" "$PROCESSED_BACKEND" || true
+
+      - name: Terraform Init
+        id: init
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.TF_SUB_ID_IT_SHARED }}
+          TF_VAR_subscription_id: ${{ secrets.TF_SUB_ID_IT_SHARED }}
+        run: |
+          echo "🚀 Initializing Terraform..."
+          echo "   Backend config: ${{ steps.envsubst.outputs.processed_backend }}"
+
+          terraform init \
+            -backend-config="${{ steps.envsubst.outputs.processed_backend }}" \
+            -input=false \
+            -no-color
+
+      - name: Patch AVM Static Web App – add app_settings to lifecycle ignore_changes
+        run: |
+          # AVM v0.6.2 ignores only repository_url/repository_branch; app_settings are managed
+          # outside Terraform (SWA deploy pipelines), so keep them from being wiped on apply.
+          AVM_DIR=".terraform/modules/StaticWebApp.static_web_app"
+          if [ -d "$AVM_DIR" ]; then
+            cat > "${AVM_DIR}/app_settings_lifecycle_override.tf" << 'TFEOF'
+          resource "azurerm_static_web_app" "this" {
+            lifecycle {
+              ignore_changes = [
+                repository_url,
+                repository_branch,
+                app_settings,
+              ]
+            }
+          }
+          TFEOF
+            echo "✅ Patched AVM Static Web App lifecycle for app_settings"
+          else
+            echo "ℹ️  AVM Static Web App module not initialised, skipping patch"
+          fi
+
+      - name: Terraform Validate
+        id: validate-tf
+        run: |
+          echo "🔍 Validating Terraform configuration..."
+          terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        env:
+          TF_VAR_flux_ssh_private_key: ${{ secrets.TF_FLUX_PKEY }}
+          # ARM_SUBSCRIPTION_ID: ${{ steps.subscription.outputs.subscription_id }}
+          # TF_VAR_subscription_id: ${{ steps.subscription.outputs.subscription_id }}
+          # TF_VAR_subscription_aks_id: ${{ steps.subscription.outputs.subscription_id }}
+        run: |
+          echo "📋 Running Terraform plan..."
+          echo "   Environment: ${{ github.event.inputs.environment }}"
+          echo "   Region: ${{ github.event.inputs.region }}"
+          echo "   Tfvars: ${{ steps.envsubst.outputs.processed_tfvars }}"
+
+          terraform plan \
+            -var-file="${{ steps.envsubst.outputs.processed_tfvars }}" \
+            -input=false \
+            -no-color \
+            -out=tfplan
+
+      - name: Export Terraform Plan
+        id: show-plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        run: |
+          echo "📄 Exporting Terraform plan..."
+          terraform show -no-color tfplan > tfplan.txt
+
+          echo "📄 Exporting Terraform plan to json"
+          terraform show -json tfplan > tfplan.json
+
+          echo "📊 Generating Terraform graph..."
+          terraform graph -plan=tfplan > tfplan.dot
+
+          echo "## 📋 Terraform Plan Output" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```terraform' >> $GITHUB_STEP_SUMMARY
+          terraform show -no-color tfplan >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Terraform Graph" >> $GITHUB_STEP_SUMMARY
+          echo "Graph file generated: \`tfplan.dot\`" >> $GITHUB_STEP_SUMMARY
+          echo "Use [Graphviz Online](https://dreampuf.github.io/GraphvizOnline/) to visualize" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Terraform Plan Artifacts
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}
+          path: |
+            tfplan.txt
+            tfplan.dot
+            tfplan.json
+          retention-days: 30
+
+      - name: Terraform Apply
+        id: apply
+        if: github.event.inputs.action == 'apply'
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_subscription_id: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_flux_ssh_private_key: ${{ secrets.TF_FLUX_PKEY }}
+        run: |
+          echo "🚀 Applying Terraform changes..."
+          echo "   Environment: ${{ github.event.inputs.environment }}"
+          echo "   Region: ${{ github.event.inputs.region }}"
+
+          terraform apply \
+            -input=false \
+            -no-color \
+            -auto-approve \
+            -var-file="${{ steps.envsubst.outputs.processed_tfvars }}"           
+          # terraform apply \
+          #   -input=false \
+          #   -no-color \
+          #   -auto-approve \
+          #   tfplan
+
+      - name: Terraform Destroy Plan
+        id: destroy-plan
+        if: github.event.inputs.action == 'destroy'
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_subscription_id: ${{ steps.subscription.outputs.subscription_id }}
+        run: |
+          echo "⚠️ Planning Terraform destroy..."
+          echo "   Environment: ${{ github.event.inputs.environment }}"
+          echo "   Region: ${{ github.event.inputs.region }}"
+
+          terraform plan \
+            -var-file="${{ steps.envsubst.outputs.processed_tfvars }}" \
+            -input=false \
+            -no-color \
+            -destroy \
+            -out=tfplan-destroy
+
+      - name: Terraform Destroy
+        id: destroy
+        if: github.event.inputs.action == 'destroy'
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ steps.subscription.outputs.subscription_id }}
+          TF_VAR_subscription_id: ${{ steps.subscription.outputs.subscription_id }}
+        run: |
+          echo "🗑️ Executing Terraform destroy..."
+          echo "   Environment: ${{ github.event.inputs.environment }}"
+          echo "   Region: ${{ github.event.inputs.region }}"
+
+          terraform apply \
+            -input=false \
+            -no-color \
+            -auto-approve \
+            tfplan-destroy
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Terraform Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ github.event.inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Region | \`${{ github.event.inputs.region }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | \`${{ github.event.inputs.action }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tfvars Source | \`${{ needs.validate.outputs.tfvars_file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tfvars Processed | \`${{ steps.envsubst.outputs.processed_tfvars }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend File | \`${{ needs.validate.outputs.backend_file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ref | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered By | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID | \`${{ github.run_id }}\` |" >> $GITHUB_STEP_SUMMARY

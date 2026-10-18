@@ -1,0 +1,438 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-grafana-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    ## PRODUCTION-READY PROMETHEUS + GRAFANA VALUES
+    ## Last Updated: 2026-01-01
+    ## All sensitive values externalized to Secrets
+
+
+    ## GLOBAL CONFIGURATION ##
+    nameOverride: ""
+    fullnameOverride: ""
+
+
+    ## PROMETHEUS CONFIGURATION ##
+    prometheus:
+      ingress:
+        enabled: true
+        ingressClassName: webapprouting.kubernetes.azure.com
+        annotations: {}
+        hosts:
+          - prometheus-contoso-shared-non-prod.contosogrp-cloud.com
+        paths:
+          - /
+        pathType: Prefix
+        tls:
+          - secretName: ssl-contoso-grp-com-tls
+            hosts:
+              - prometheus-contoso-shared-non-prod.contosogrp-cloud.com
+
+      # ServiceAccount for Workload Identity
+      serviceAccount:
+        create: true
+        name: prometheus-operator
+        annotations:
+          azure.workload.identity/use: "true"
+
+      prometheusSpec:
+        # ===== HIGH AVAILABILITY =====
+        replicas: 2
+        podAntiAffinity: "hard"  # Spread replicas across nodes
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
+
+        # ===== RESOURCE MANAGEMENT =====
+        # Adjust based on cluster size and workload metrics collected
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: 1000m
+
+        # ===== DATA RETENTION =====
+        retention: 15d        # Keep 15 days of metrics
+        retentionSize: "100GB" # OR storage limit, whichever is smaller
+
+        # ===== PERSISTENT STORAGE ON AZURE =====
+        # Uses managed-csi storage class (Azure Managed Disks with CSI driver)
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: managed-premium-sc-tags  # Premium managed disk
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 150Gi  # Sized for 15d retention
+
+        # ===== WORKLOAD IDENTITY SETUP FOR REMOTE WRITE =====
+        # (Optional) Enable if sending metrics to Azure Monitor/Log Analytics
+        # Step 1: Create User-Assigned Managed Identity in Azure
+        # Step 2: Grant "Monitoring Metrics Publisher" role to the identity
+        # Step 3: Create federated credential linking SA to the identity
+        # Step 4: Uncomment serviceAccountName below
+        # serviceAccountName: prometheus-operator
+        
+        # Remote write to Azure Monitor (Optional)
+        # remoteWrite:
+        # - url: https://<location>.monitoring.azure.com/api/prometheus/api/v1/write
+        #   queueConfig:
+        #     capacity: 10000
+        #     maxShards: 200
+        #     minShards: 1
+        #     maxSamplesPerSend: 1000
+        #     batchSendWaitTime: 5s
+        #     minBackoff: 30ms
+        #     maxBackoff: 100ms
+        #   writeRelabelConfigs:
+        #     - sourceLabels: [__name__]
+        #       regex: 'up|container_.*|node_.*'
+        #       action: keep
+
+        # ===== PROMETHEUS RBAC =====
+        rbac:
+          create: true
+
+        # ===== SERVICE MONITOR SELECTOR =====
+        serviceMonitorSelector: {}  # Auto-discover all ServiceMonitors
+        serviceMonitorNamespaceSelector: {}
+
+        # ===== ALERTING =====
+        alertingRules:
+          {}
+          # Create alerting rules in separate PrometheusRule CRs
+
+
+    ## GRAFANA CONFIGURATION ##
+    grafana:
+      # image:
+      #   registry: labacr.azurecr.io
+      #   repository: lz-temp-grafana/grafana
+      #   tag: 12.3.1
+      #   sha: ""
+      #   pullPolicy: IfNotPresent
+
+      # initChownData:
+      #   enabled: true
+      #   image:
+      #     registry: labacr.azurecr.io
+      #     repository: lz-temp-busybox/busybox
+      #     tag: 1.31.1
+      #     sha: ""
+      #     pullPolicy: IfNotPresent
+
+      # Disable client-side validation for sensitive keys in values
+      assertNoLeakedSecrets: false
+      
+      # ServiceAccount for future Workload Identity use
+      serviceAccount:
+        create: true
+        name: grafana
+        annotations:
+          # Reserved for future: Workload Identity for Azure AD graph access
+          # azure.workload.identity/use: "true"
+
+      # ===== REPLICAS & HA NOTE =====
+      # True HA requires external database (PostgreSQL/MySQL) and Redis
+      # Single replica + persistent storage is recommended for most deployments
+      replicas: 1
+      
+      # ===== RESOURCE MANAGEMENT =====
+      resources:
+        requests:
+          memory: 512Mi
+          cpu: 250m
+        limits:
+          memory: 2Gi
+          cpu: 1000m
+
+      # ===== PERSISTENCE FOR DASHBOARDS/PLUGINS =====
+      persistence:
+        enabled: true
+        storageClassName: managed-premium-sc-tags  # Azure Managed Disk
+        size: 20Gi  # Increased for custom dashboards
+        accessModes:
+          - ReadWriteOnce
+        # Enable GC to prevent dangling PVs
+        finalizers:
+          - kubernetes.io/pvc-protection
+
+      # ===== INGRESS WITH ORGANIZATION TLS CERT =====
+      ingress:
+        enabled: true
+        ingressClassName: webapprouting.kubernetes.azure.com
+        annotations: {}
+        hosts:
+          - grafana-contoso-shared-non-prod.contosogrp-cloud.com
+        path: /
+        pathType: Prefix
+        tls:
+          - secretName: ssl-contoso-grp-com-tls
+            hosts:
+              - grafana-contoso-shared-non-prod.contosogrp-cloud.com
+
+
+
+      # ===== ADMIN CREDENTIALS FROM SECRET =====
+      # Admin password is loaded from the secret via environment variable
+      admin:
+        existingSecret: "grafana-azure-ad-creds"
+        userKey: admin-user
+        passwordKey: GRAFANA_ADMIN_PASSWORD
+      
+      # ===== ENVIRONMENT VARIABLES FROM SECRETS =====
+      # Grafana will read these env vars for Azure AD configuration
+      envFromSecret: "grafana-azure-ad-creds"
+
+      # ===== GRAFANA CONFIGURATION (grafana.ini) =====
+      grafana.ini:
+        
+        # Server settings
+        server:
+          root_url: "https://grafana-contoso-shared-non-prod.contosogrp-cloud.com"
+          serve_from_sub_path: false
+          cookie_secure: true
+          cookie_httponly: true
+          cookie_samesite: "Strict"
+          
+        # Database (using SQLite by default, persistent storage handles this)
+        # For true HA, switch to PostgreSQL:
+        # database:
+        #   type: postgres
+        #   host: postgres-primary.database:5432
+        #   name: grafana_db
+        #   user: ${GF_DATABASE_USER}
+        #   password: ${GF_DATABASE_PASSWORD}
+        #   ssl_mode: require
+        
+        # ===== AZURE AD (ENTRA ID) AUTHENTICATION =====
+        # All credentials come from envFromSecret
+        auth:
+          disable_login_form: false  # Keep standard login as backup
+          oauth_auto_login: false    # Don't force redirect to Azure AD
+          
+        auth.azuread:
+          name: Azure AD
+          enabled: true
+          
+          # Credentials from environment variables (set via envFromSecret)
+          # Don't set client_id/client_secret here - Grafana reads from GF_AUTH_AZUREAD_CLIENT_ID env var
+          # client_id and client_secret are injected via environment variables
+          
+          # Azure AD endpoints (tenant ID from environment variable)
+          # auth_url and token_url are also read from GF_AUTH_AZUREAD_AUTH_URL and GF_AUTH_AZUREAD_TOKEN_URL env vars
+          
+          # Scopes for user info
+          # Groups come from ID token (configured in Azure AD App Registration > Token Configuration)
+          # NOT from Graph API calls, so we don't need GroupMember.Read.All scope
+          scopes: "openid email profile"
+          
+          # Allow sign-up (auto-create users on first login)
+          allow_sign_up: true
+          
+          # Fetch roles from Azure AD groups
+          # Role mapping using JMESPath to check group membership - injected via GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_PATH env var
+          # Admin group: 33333333-3333-3333-3333-333333333333
+          # Editor group: 44444444-4444-4444-4444-444444444444
+          # Viewer group: 55555555-5555-5555-5555-555555555555
+          # role_attribute_path is set via environment variable GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_PATH (from ExternalSecret)
+          role_attribute_strict: false
+          allow_assign_grafana_admin: true
+          
+          # Organization mapping - map Azure AD groups to Grafana roles
+          # Format: <GroupID>:<OrgID>:<Role>
+          # Admin group: 33333333-3333-3333-3333-333333333333 -> Org 1 -> Admin
+          # Editor group: 44444444-4444-4444-4444-444444444444 -> Org 1 -> Editor
+          # Viewer group: 55555555-5555-5555-5555-555555555555 -> Org 1 -> Viewer
+
+          # org_mapping: "${GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_PATH}"
+
+
+          org_mapping: "66666666-6666-6666-6666-666666666666:1:Admin 77777777-7777-7777-7777-777777777777:1:Viewer"
+          
+          skip_org_role_sync:  false
+          use_pkce: true
+
+        # ===== LOGGING =====
+        log:
+          mode: console
+          level: debug
+          filters: "oauth:debug,sqlstore:debug"  # Debug OAuth and SQL queries
+
+        # ===== SECURITY =====
+        security:
+          # Grafana will auto-generate secret_key on first start
+          # secret_key is managed automatically by Grafana
+          
+          # Disable anonymous access
+          disable_gravatar: true
+          
+        # ===== SESSION MANAGEMENT =====
+        session:
+          provider: memory  # Or 'postgres' for HA
+          cookie_secure: true
+          cookie_httponly: true
+          cookie_samesite: "Strict"
+          session_life_days: 7
+
+        # ===== FEATURE TOGGLES =====
+        # Enable new features as they stabilize
+        feature_toggles:
+          publicDashboards: true
+          alertingBackendMigration: false  # Depends on setup
+
+        # ===== PLUGIN SECURITY =====
+        plugins:
+          allow_unsigned_plugins: false  # Only signed plugins
+          plugins_allow_ui_updates: false  # Prevent plugin auto-update
+
+        # ===== SMTP FOR ALERTS (Optional) =====
+        # smtp:
+        #   enabled: true
+        #   host: "${GF_SMTP_HOST}"
+        #   port: 587
+        #   user: "${GF_SMTP_USER}"
+        #   password: "${GF_SMTP_PASSWORD}"
+        #   from_address: grafana@organization.com
+        #   from_name: "Grafana Alerts"
+        #   skip_verify: false
+
+
+    ## ALERTMANAGER CONFIGURATION ##
+    alertmanager:
+      alertmanagerSpec:
+        # ===== HIGH AVAILABILITY =====
+        replicas: 2
+        podAntiAffinity: "hard"
+        retention: 120h  # Keep 5 days of alerts
+
+        # ===== RESOURCE MANAGEMENT =====
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+
+        # ===== PERSISTENT STORAGE =====
+        storage:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: managed-premium-sc-tags
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+
+      # ===== ALERT ROUTING CONFIGURATION =====
+      config:
+        global:
+          resolve_timeout: 5m
+          
+        # Route alerts to appropriate receivers
+        route:
+          receiver: "default"
+          group_by: ["alertname", "cluster", "service"]
+          group_wait: 10s
+          group_interval: 10s
+          repeat_interval: 12h
+          routes:
+            - receiver: "ops-team"
+              group_by: ["severity"]
+              matchers:
+                - severity: "critical"
+              continue: true
+            
+            - receiver: "dev-team"
+              matchers:
+                - severity: "warning"
+
+        # Example receivers (configure based on your needs)
+        receivers:
+          - name: "default"
+            # Example: Send to PagerDuty, Slack, etc.
+            # pagerduty_configs:
+            #   - service_key: "${PAGERDUTY_SERVICE_KEY}"
+            # slack_configs:
+            #   - api_url: "${SLACK_WEBHOOK_URL}"
+
+          - name: "ops-team"
+            # Critical alerts to ops team
+
+          - name: "dev-team"
+            # Dev alerts
+
+
+    ## PROMETHEUS OPERATOR CONFIGURATION ##
+    prometheusOperator:
+      enabled: true
+      manageCrds: true  # Manages PrometheusRule CRDs
+
+      # RBAC for operator
+      rbac:
+        create: true
+
+
+    ## NODE EXPORTER (System metrics) ##
+    nodeExporter:
+      enabled: true
+      
+      resources:
+        requests:
+          memory: 64Mi
+          cpu: 50m
+        limits:
+          memory: 128Mi
+          cpu: 200m
+
+
+    ## KUBE-STATE-METRICS ##
+    kubeStateMetrics:
+      enabled: true
+      
+      resources:
+        requests:
+          memory: 128Mi
+          cpu: 100m
+        limits:
+          memory: 256Mi
+          cpu: 500m
+
+
+    ## PROMETHEUS-WINDOWS-EXPORTER (If Windows nodes exist) ##
+    windowsMonitoring:
+      enabled: false  # Enable if using Windows nodes
+
+
+    ## NETWORK POLICIES (Optional but recommended) ##
+    # Enable if using Calico or other CNI with network policy support
+    networkPolicy:
+      enabled: false
+      ingress:
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  name: monitoring
+            - podSelector:
+                matchLabels:
+                  app: prometheus
+        - ports:
+            - protocol: TCP
+              port: 9090
+
+
+---

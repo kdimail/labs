@@ -1,0 +1,44 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: operators
+  namespace: flux-system
+spec:
+  interval: 5m
+  prune: true
+  wait: true
+  timeout: 10m
+  
+  path: ./contoso/flux/operators/overlays/qa
+  
+  dependsOn:
+    - name: infrastructure
+  
+  postBuild:
+    substituteFrom:
+      - kind: Secret
+        name: cluster-secret-config
+        optional: false
+  
+  sourceRef:
+    kind: GitRepository
+    name: qa-flux
+    namespace: flux-system
+  
+  # healthChecks removed to prevent deadlock:
+  # - MongoDB CRD is created by the Helm chart
+  # - Helm chart can't deploy due to cross-namespace error
+  # - Health check blocks Kustomization from completing
+  # - Kustomization can't update to get the fix!
+  # 
+  # healthChecks:
+  #   - apiVersion: apiextensions.k8s.io/v1
+  #     kind: CustomResourceDefinition
+  #     name: mongodbcommunity.mongodbcommunity.mongodb.com
+  #     namespace: ""
+  #   - apiVersion: apiextensions.k8s.io/v1
+  #     kind: CustomResourceDefinition
+  #     name: rabbitmqclusters.rabbitmq.com
+  #     namespace: ""
+

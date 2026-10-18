@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contoso-authorization-backend-api-config
+  namespace: contoso
+  labels:
+    app: contoso-authorization-backend
+    service: contoso-authorization-backend
+data:
+  ApiUrls__ContosoBaseUrl: "https://contoso-authorization-backend-dev.cloud.ssl.contoso-grp.com/"
+  CommandTelemetry__ActivitySourceName: Contoso-authorization-backend.Commands
+  CommandTelemetry__MeterName: Contoso-authorization-backend.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: LabCo-HKG91-Contoso-Authorization-Backend
+  Logging__LogLevel__LabCo-HKG91-Contoso-Authorization-Backend: Debug
+  OpenTelemetry__ServiceName: LabCo-HKG91-Contoso-Authorization-Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: contoso-authorization-backendService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: LabCo-HKG91-Contoso-Authorization-Backend.Api
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Authorization-Backend.Api: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Authorization-Backend.Application: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-Authorization-Backend.Infrastructure: Debug

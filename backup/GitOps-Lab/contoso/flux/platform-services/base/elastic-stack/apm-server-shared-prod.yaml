@@ -1,0 +1,213 @@
+# APM Server Instance - Prod (3 replicas, shared by both switzerlandnorth-shared-prod and
+# westus3-shared-prod - each region runs its own physically separate deployment from this spec)
+apiVersion: apm.k8s.elastic.co/v1
+kind: ApmServer
+metadata:
+  name: production-apm
+  namespace: elastic-stack
+spec:
+  version: 8.12.0
+  count: 3
+  
+  # References
+  elasticsearchRef:
+    name: production-es
+  
+  kibanaRef:
+    name: production-kb
+  
+  # Secure settings for credentials
+  secureSettings:
+    - secretName: apm-server-credentials
+      entries:
+        - key: secret-token
+          path: SECRET_TOKEN
+  
+  # HTTP configuration with TLS
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: false
+    service:
+      spec:
+        type: ClusterIP
+  
+  # APM Server configuration
+  config:
+    apm-server:
+      # Real User Monitoring configuration
+      rum:
+        enabled: true
+        allow_origins:
+          - "https://app.yourdomain.com"
+          - "https://www.yourdomain.com"
+        allow_headers:
+          - "Content-Type"
+          - "Content-Encoding"
+          - "Accept"
+        allow_credentials: true
+        library_pattern: "node_modules|bower_components|~"
+        exclude_from_grouping: "^/webpack"
+        source_mapping:
+          enabled: true
+          cache:
+            expiration: 5m
+      
+      # Anonymous authentication with rate limiting
+      auth:
+        # Secret token for agent authentication (sourced from AKV via ExternalSecret)
+        secret_token: "${SECRET_TOKEN}"
+        anonymous:
+          enabled: true
+          allow_agent:
+            - "RUM/js"
+          rate_limit:
+            event_limit: 300
+            ip_limit: 1000
+      
+      # API Key authentication
+      api_key:
+        enabled: true
+        limit: 100
+      
+      # Agent configuration
+      instrumentation:
+        enabled: true
+      
+      data_streams:
+        enabled: true
+      
+      # Sampling strategy
+      sampling:
+        keep_unsampled: true
+      
+      agent:
+        config:
+          cache:
+            expiration: 30s
+      
+      # Jaeger integration
+      jaeger:
+        grpc:
+          enabled: true
+          host: "0.0.0.0:14250"
+        http:
+          enabled: true
+          host: "0.0.0.0:14268"
+    
+    # Elasticsearch output configuration
+    output.elasticsearch:
+      bulk_max_size: 50
+      bulk_flush_interval: 1s
+      compression_level: 1
+      ilm.enabled: true
+      ilm.pattern: "{now/d}-000001"
+      ilm.policy: "apm-policy"
+    
+    # Queue configuration
+    queue.mem:
+      events: 4096
+      flush.min_events: 2048
+      flush.timeout: 1s
+    
+    # Logging configuration
+    logging:
+      level: info
+      to_stderr: true
+      metrics:
+        enabled: true
+        period: 30s
+  
+  # Pod template
+  podTemplate:
+    metadata:
+      labels:
+        app: apm-server
+        tier: backend
+    spec:
+      # Pod-level security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    apm.k8s.elastic.co/name: production-apm
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    apm.k8s.elastic.co/name: production-apm
+                topologyKey: topology.kubernetes.io/zone
+      
+      serviceAccountName: apm-server
+      terminationGracePeriodSeconds: 30
+      
+      containers:
+        - name: apm-server
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 50m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          
+          ports:
+            - name: https
+              containerPort: 8200
+              protocol: TCP
+            - name: jaeger-grpc
+              containerPort: 14250
+              protocol: TCP
+            - name: jaeger-http
+              containerPort: 14268
+              protocol: TCP
+          
+          livenessProbe:
+            tcpSocket:
+              port: 8200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            tcpSocket:
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: var-tmp
+              mountPath: /var/tmp
+      
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: var-tmp
+          emptyDir: {}

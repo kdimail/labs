@@ -1,0 +1,19 @@
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: azure-kv
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      identityId: "${eso_client_id}"
+      tenantId: "${tenant_id}"
+      vaultUrl: "${vault_url}"
+      serviceAccountRef:
+        name: external-secrets-sa
+        namespace: external-secrets
+      useAzureSDK: true
+      environmentType: PublicCloud
+
+
+      

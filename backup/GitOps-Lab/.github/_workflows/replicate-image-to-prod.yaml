@@ -1,0 +1,259 @@
+name: Replicate Image to Prod ACR
+
+# ────────────────────────────────────────────────────────────────────────────
+# Runs when a prod promotion PR is opened/updated in Apps-GitOps.
+# Supports two ecosystems detected from changed file paths:
+#
+#   contoso  →  IL non-prod ACR  →  Switzerland North prod ACR
+#   3dx      →  WEU non-prod ACR →  WEU prod ACR
+#
+# Copies the image using docker pull/tag/push.
+#
+# Configure as a **required status check** in branch protection so the
+# promote PR cannot be merged until the image is available in prod ACR.
+#
+# Branch convention from promote.yaml:
+#   promote/prod/<microservice-short>-<imageTag>
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+env:
+  CONTOSO_SOURCE_ACR: ${{ vars.CONTAINER_REGISTRY_NONPROD }}
+  CONTOSO_PROD_ACR:   ${{ vars.CONTAINER_REGISTRY_PROD }}
+
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  replicate-image:
+    name: Replicate image to prod ACR
+    runs-on: ["self-hosted", "Region:il"]
+    # Only run for prod promotion branches
+    if: startsWith(github.head_ref, 'promote/prod/')
+
+    steps:
+      # ── 1. Checkout the PR branch to read manifests ───────────────────────
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+
+      # ── 2. Install yq ────────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      # ── 3. Detect ecosystem + extract image coordinates from changed HelmReleases ─
+      - name: Extract image coordinates
+        id: images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Get the list of changed HelmRelease files from the PR
+          CHANGED_FILES=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --json files \
+            --jq '[.files[].path | select(endswith("helmrelease.yaml"))] | .[]')
+
+          if [ -z "${CHANGED_FILES}" ]; then
+            echo "::error::No HelmRelease files found in PR changes"
+            exit 1
+          fi
+
+          echo "Changed HelmRelease files:"
+          echo "${CHANGED_FILES}"
+
+          # ── Ecosystem detection ─────────────────────────────────────────
+          # Inspect the first changed file path to determine which ACR pair to use.
+          FIRST_HR=$(echo "${CHANGED_FILES}" | head -1)
+
+          if [[ "${FIRST_HR}" == contoso/* ]]; then
+            ECOSYSTEM="contoso"
+            SOURCE_ACR="${{ env.CONTOSO_SOURCE_ACR }}"
+            PROD_ACR="${{ env.CONTOSO_PROD_ACR }}"
+          elif [[ "${FIRST_HR}" == 3DX/* ]]; then
+            ECOSYSTEM="3dx"
+            SOURCE_ACR="${{ env.THREEDX_SOURCE_ACR }}"
+            PROD_ACR="${{ env.THREEDX_PROD_ACR }}"
+          else
+            echo "::error::Cannot determine ecosystem from path: ${FIRST_HR} (expected contoso/* or 3DX/*)"
+            exit 1
+          fi
+
+          echo "Ecosystem  : ${ECOSYSTEM}"
+          echo "Source ACR : ${SOURCE_ACR}"
+          echo "Target ACR : ${PROD_ACR}"
+
+          # Persist for all downstream steps
+          echo "ECOSYSTEM=${ECOSYSTEM}"   >> "$GITHUB_ENV"
+          echo "SOURCE_ACR=${SOURCE_ACR}" >> "$GITHUB_ENV"
+          echo "PROD_ACR=${PROD_ACR}"     >> "$GITHUB_ENV"
+
+          # ── Image coordinates ───────────────────────────────────────────
+          # Extract unique image repository + tag from the first prod
+          # HelmRelease (all prod regions get the same image reference).
+          # Contoso and 3DX/Pando services are digest-only (no tag field,
+          # no comment) — derive a push tag from the digest short hash.
+          IMAGE_REPO=$(yq '.spec.values.image.repository // ""' "${FIRST_HR}")
+          IMAGE_TAG=$(yq '.spec.values.image.tag // ""' "${FIRST_HR}")
+          IMAGE_DIGEST=$(yq '.spec.values.image.digest // ""' "${FIRST_HR}")
+
+          [ "${IMAGE_REPO}"   = "null" ] && IMAGE_REPO=""
+          [ "${IMAGE_TAG}"    = "null" ] && IMAGE_TAG=""
+          [ "${IMAGE_DIGEST}" = "null" ] && IMAGE_DIGEST=""
+
+          if [ -z "${IMAGE_TAG}" ] && [ -n "${IMAGE_DIGEST}" ]; then
+            IMAGE_TAG="sha-${IMAGE_DIGEST#sha256:}"
+            IMAGE_TAG="${IMAGE_TAG:0:20}"
+            echo "No image.tag found — using digest slug as push tag: ${IMAGE_TAG}"
+          fi
+
+          if [ -z "${IMAGE_REPO}" ] || ([ -z "${IMAGE_TAG}" ] && [ -z "${IMAGE_DIGEST}" ]); then
+            echo "::error::Could not extract image.repository or image tag/digest from ${FIRST_HR}"
+            exit 1
+          fi
+
+          echo "Image repository : ${IMAGE_REPO}"
+          echo "Image tag        : ${IMAGE_TAG}"
+          echo "Image digest     : ${IMAGE_DIGEST:-<not set>}"
+
+          echo "image_repo=${IMAGE_REPO}"     >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}"       >> "$GITHUB_OUTPUT"
+          echo "image_digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Login to Azure and authenticate Docker to both ACRs ─────────────
+      - name: Azure Login with Managed Identity
+        run: |
+          echo "Logging in to Azure using Managed Identity..."
+          az login --identity
+          echo "✓ Successfully logged in to Azure"
+
+      - name: Docker login to source ACR (non-prod)
+        run: |
+          az acr login --name "${SOURCE_ACR%%.*}"
+          echo "✓ Authenticated to ${SOURCE_ACR}"
+
+      - name: Docker login to target ACR — Contoso (prod SWN)
+        if: env.ECOSYSTEM == 'contoso'
+        run: |
+          az acr login \
+            --name "${PROD_ACR%%.*}" \
+            --subscription "${{ secrets.TF_SUB_ID_CONTOSO_PROD }}"
+          echo "✓ Authenticated to ${PROD_ACR}"
+
+      - name: Docker login to target ACR — 3DX/Pando (prod WEU)
+        if: env.ECOSYSTEM == '3dx'
+        run: |
+          az acr login \
+            --name "${PROD_ACR%%.*}" \
+            --subscription "${{ secrets.LZ_SUB_ID_3DX_PROD }}"
+          echo "✓ Authenticated to ${PROD_ACR}"
+
+      # ── 5. Pull from source ACR, push to prod ACR ─────────────────────────
+      - name: Replicate image to prod ACR
+        env:
+          IMAGE_REPO:   ${{ steps.images.outputs.image_repo }}
+          IMAGE_TAG:    ${{ steps.images.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.images.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+
+          # Pull by digest when available (guarantees the exact tested image);
+          # fall back to tag for tag-only references (Contoso services)
+          if [ -n "${IMAGE_DIGEST}" ]; then
+            SOURCE_IMAGE="${SOURCE_ACR}/${IMAGE_REPO}@${IMAGE_DIGEST}"
+          else
+            SOURCE_IMAGE="${SOURCE_ACR}/${IMAGE_REPO}:${IMAGE_TAG}"
+          fi
+          TARGET_IMAGE="${PROD_ACR}/${IMAGE_REPO}:${IMAGE_TAG}"
+
+          echo "Pulling : ${SOURCE_IMAGE}"
+          docker pull "${SOURCE_IMAGE}"
+
+          echo "Tagging : ${SOURCE_IMAGE} → ${TARGET_IMAGE}"
+          docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+
+          echo "Pushing : ${TARGET_IMAGE}"
+          docker push "${TARGET_IMAGE}"
+          echo "✓ Successfully pushed ${TARGET_IMAGE}"
+
+          # Replicate 'latest' tag only for tag-based images (Contoso).
+          # Digest-pinned images (3DX/Pando) must not have latest overwritten
+          # with an unrelated image already sitting in the non-prod ACR.
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            SOURCE_LATEST="${SOURCE_ACR}/${IMAGE_REPO}:latest"
+            TARGET_LATEST="${PROD_ACR}/${IMAGE_REPO}:latest"
+            echo "Pulling : ${SOURCE_LATEST}"
+            docker pull "${SOURCE_LATEST}" && \
+              docker tag "${SOURCE_LATEST}" "${TARGET_LATEST}" && \
+              docker push "${TARGET_LATEST}" && \
+              echo "✓ Successfully pushed ${TARGET_LATEST}" || \
+              echo "⚠ latest tag not found in source ACR — skipping"
+          else
+            echo "ℹ Digest-based image — skipping latest tag replication"
+          fi
+
+      # ── 5a. Cleanup local images from runner ──────────────────────────────
+      - name: Remove pulled/tagged images from runner
+        if: always()
+        env:
+          IMAGE_REPO:   ${{ steps.images.outputs.image_repo }}
+          IMAGE_TAG:    ${{ steps.images.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.images.outputs.image_digest }}
+        run: |
+          docker rmi "${SOURCE_ACR}/${IMAGE_REPO}:${IMAGE_TAG}"    2>/dev/null || true
+          docker rmi "${PROD_ACR}/${IMAGE_REPO}:${IMAGE_TAG}"      2>/dev/null || true
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            docker rmi "${SOURCE_ACR}/${IMAGE_REPO}:latest"        2>/dev/null || true
+            docker rmi "${PROD_ACR}/${IMAGE_REPO}:latest"          2>/dev/null || true
+          fi
+          [ -n "${IMAGE_DIGEST}" ] && docker rmi "${SOURCE_ACR}/${IMAGE_REPO}@${IMAGE_DIGEST}" 2>/dev/null || true
+          echo "✓ Local images cleaned up"
+
+      # ── 6. Stamp the PR with replication status ───────────────────────────
+      - name: Comment on PR
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPO:   ${{ steps.images.outputs.image_repo }}
+          IMAGE_TAG:    ${{ steps.images.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.images.outputs.image_digest }}
+        run: |
+          if [ -n "${IMAGE_DIGEST}" ]; then
+            DETAIL="Tag: \`${IMAGE_TAG}\` / Digest: \`${IMAGE_DIGEST}\`"
+          else
+            DETAIL="Tag: \`${IMAGE_TAG}\`"
+          fi
+          COMMENT=$(printf '## ✅ Image Replicated to Prod ACR\n\n- **Source:** `%s/%s`\n- **Target:** `%s/%s`\n- **Reference:** %s\n\nThe image is now available in the production registry. This PR is safe to merge.' \
+            "${SOURCE_ACR}" "${IMAGE_REPO}" \
+            "${PROD_ACR}" "${IMAGE_REPO}" \
+            "${DETAIL}")
+
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "${COMMENT}"

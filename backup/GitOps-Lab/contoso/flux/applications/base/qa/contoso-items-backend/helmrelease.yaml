@@ -1,0 +1,167 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: contoso-items-backend
+  namespace: contoso
+spec:
+  serviceAccountName: contoso
+  interval: 5m
+  chart:
+    spec:
+      chart: ./base
+      sourceRef:
+        kind: GitRepository
+        name: base-helm-chart
+        namespace: contoso
+      interval: 1m
+  values:
+    nameOverride: "contoso-items-backend"
+    fullnameOverride: "contoso-items-backend"
+    replicaCount: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+    image:
+      registry: "labacr.azurecr.io"
+      repository: "contoso.items.backend"
+      pullPolicy: Always
+      digest: sha256:f6ea2653c0b2b2e070f9d9d8d5e6666905e9e6101fde4823d913eef1b56419ec
+    service:
+      type: ClusterIP
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+        prometheus.io/path: "/metrics"
+      labels:
+        app: contoso-items-backend
+    deployment:
+      schedulerName: default-scheduler
+      podLabels:
+        app: contoso-items-backend
+      annotations:
+        reloader.stakater.com/auto: "true"
+    containerPort: 8080
+    startupProbe:
+      enabled: true
+      httpGet:
+        path: /health/startup
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 36
+    livenessProbe:
+      enabled: true
+      httpGet:
+        path: /health/live
+        port: 8080
+      initialDelaySeconds: 0
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readinessProbe:
+      enabled: true
+      httpGet:
+        path: /health/ready
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+    envFrom:
+      configMapRef:
+        - name: companies-country-map
+        - name: icu-encoding-mappings
+        - name: contoso-app-config
+        - name: items-api-config
+    envFromSecrets:
+      - name: AZURE_TENANT_ID
+        secretName: sp-credentials
+        secretKey: AZURE_TENANT_ID
+      - name: AZURE_CLIENT_ID
+        secretName: sp-credentials
+        secretKey: AZURE_CLIENT_ID
+      - name: AZURE_CLIENT_SECRET
+        secretName: sp-credentials
+        secretKey: AZURE_CLIENT_SECRET
+      - name: ConnectionStrings__GalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__GalDB2ConnStr
+      - name: Jwt__Audience
+        secretName: contoso-secrets
+        secretKey: Jwt__Audience
+      - name: Jwt__ValidIssuer
+        secretName: contoso-secrets
+        secretKey: Jwt__ValidIssuer
+      - name: Jwt__SecretJwtKey
+        secretName: contoso-secrets
+        secretKey: Jwt__SecretJwtKey
+      - name: Serilog__InfluxDb__Token
+        secretName: contoso-secrets
+        secretKey: Serilog__InfluxDb__Token
+      - name: Serilog__InfluxDb__OrganizationId
+        secretName: contoso-secrets
+        secretKey: Serilog__InfluxDb__OrganizationId
+      - name: Serilog__InfluxDb__Uri
+        secretName: contoso-secrets
+        secretKey: Serilog__InfluxDb__Uri
+      - name: ElasticApm__SecretToken
+        secretName: contoso-secrets
+        secretKey: ElasticApm__SecretToken
+      - name: ConnectionStrings__ContosoDB
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__ContosoDB
+      - name: ConnectionStrings__RedisConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__RedisConnStr
+      - name: ServiceBus__ConnectionString
+        secretName: contoso-secrets
+        secretKey: ServiceBus__ConnectionString
+      - name: BlobStorage__ConnectionString
+        secretName: contoso-secrets
+        secretKey: BlobStorage__ConnectionString
+      - name: ConnectionStrings__ISRAELGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__ISRAELGalDB2ConnStr
+      - name: ConnectionStrings__BTSGGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__BTSGGalDB2ConnStr
+      - name: ConnectionStrings__KOREAGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__KOREAGalDB2ConnStr
+      - name: ConnectionStrings__JAPANGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__JAPANGalDB2ConnStr
+      - name: ConnectionStrings__BELGIUMGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__BELGIUMGalDB2ConnStr
+      - name: ConnectionStrings__INGERSOLLGalDB2ConnStr
+        secretName: contoso-secrets
+        secretKey: ConnectionStrings__INGERSOLLGalDB2ConnStr
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
+    ingress:
+      enabled: true
+      ingressClassName: "webapprouting.kubernetes.azure.com"
+      hosts:
+        - host: "contoso-items-backend-qa.contosogrp-cloud.com"
+          paths:
+            - path: /
+              pathType: Prefix
+      tls:
+        enabled: true
+        entries:
+          - secretName: ssl-contoso-grp-com-tls
+            hosts:
+              - "contoso-items-backend-qa.contosogrp-cloud.com"

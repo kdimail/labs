@@ -1,0 +1,147 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    mode: deployment
+
+    replicaCount: 1
+
+    image:
+      repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-k8s
+      tag: "0.130.0"
+
+    command:
+      name: otelcol-k8s
+
+    serviceAccount:
+      create: true
+      name: opentelemetry-collector
+
+    # Inject APM secret token from Kubernetes secret
+    extraEnvs:
+      - name: APM_SECRET_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: apm-server-credentials
+            key: secret-token
+
+    # Ports to expose on the service
+    ports:
+      otlp:
+        enabled: true
+        containerPort: 4317
+        servicePort: 4317
+        protocol: TCP
+        appProtocol: grpc
+      otlp-http:
+        enabled: true
+        containerPort: 4318
+        servicePort: 4318
+        protocol: TCP
+      jaeger-compact:
+        enabled: true
+        containerPort: 6831
+        servicePort: 6831
+        protocol: UDP
+      jaeger-thrift:
+        enabled: true
+        containerPort: 14268
+        servicePort: 14268
+        protocol: TCP
+      jaeger-grpc:
+        enabled: true
+        containerPort: 14250
+        servicePort: 14250
+        protocol: TCP
+      zipkin:
+        enabled: true
+        containerPort: 9411
+        servicePort: 9411
+        protocol: TCP
+
+    config:
+      receivers:
+        jaeger:
+          protocols:
+            grpc:
+              endpoint: $${env:MY_POD_IP}:14250
+            thrift_compact:
+              endpoint: $${env:MY_POD_IP}:6831
+            thrift_http:
+              endpoint: $${env:MY_POD_IP}:14268
+        otlp:
+          protocols:
+            grpc:
+              endpoint: $${env:MY_POD_IP}:4317
+            http:
+              endpoint: $${env:MY_POD_IP}:4318
+        prometheus:
+          config:
+            scrape_configs:
+              - job_name: opentelemetry-collector
+                scrape_interval: 10s
+                static_configs:
+                  - targets:
+                      - $${env:MY_POD_IP}:8888
+        zipkin:
+          endpoint: $${env:MY_POD_IP}:9411
+
+      exporters:
+        debug: {}
+        otlp:
+          endpoint: "https://production-apm-apm-http.elastic-stack.svc:8200"
+          tls:
+            insecure: false
+            insecure_skip_verify: true
+          headers:
+            Authorization: "Bearer $${env:APM_SECRET_TOKEN}"
+
+      processors:
+        batch: {}
+        memory_limiter:
+          check_interval: 5s
+          limit_percentage: 80
+          spike_limit_percentage: 25
+
+      extensions:
+        health_check:
+          endpoint: $${env:MY_POD_IP}:13133
+
+      service:
+        extensions:
+          - health_check
+        pipelines:
+          traces:
+            receivers:
+              - otlp
+              - jaeger
+              - zipkin
+            processors:
+              - memory_limiter
+              - batch
+            exporters:
+              - otlp
+              - debug
+          metrics:
+            receivers:
+              - otlp
+              - prometheus
+            processors:
+              - memory_limiter
+              - batch
+            exporters:
+              - otlp
+              - debug
+          logs:
+            receivers:
+              - otlp
+            processors:
+              - memory_limiter
+              - batch
+            exporters:
+              - otlp
+              - debug

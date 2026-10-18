@@ -1,0 +1,24 @@
+---
+# ConfigMap for RabbitMQ OAuth2 configuration
+# This will be used by an init container to generate the final config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-oauth-config-template
+  namespace: rabbitmq
+data:
+  oauth-config.conf.template: |
+    ## OAuth2 Configuration for Azure AD
+    ## CRITICAL: Application ID URI must be set in Azure AD: api://${OAUTH_CLIENT_ID}
+    auth_oauth2.resource_server_id = api://${OAUTH_CLIENT_ID}
+    auth_oauth2.issuer = https://login.microsoftonline.com/${OAUTH_TENANT_ID}/v2.0
+    auth_oauth2.jwks_url = https://login.microsoftonline.com/${OAUTH_TENANT_ID}/discovery/v2.0/keys
+    auth_oauth2.additional_scopes_key = scp
+    
+    ## Management UI OAuth2 settings
+    management.oauth_enabled = true
+    management.oauth_client_id = ${OAUTH_CLIENT_ID}
+    management.oauth_provider_url = https://login.microsoftonline.com/${OAUTH_TENANT_ID}/v2.0
+    management.oauth_scopes = openid profile email api://${OAUTH_CLIENT_ID}/rabbitmq.configure:* api://${OAUTH_CLIENT_ID}/rabbitmq.write:* api://${OAUTH_CLIENT_ID}/rabbitmq.read:*
+    management.disable_basic_auth = false
+

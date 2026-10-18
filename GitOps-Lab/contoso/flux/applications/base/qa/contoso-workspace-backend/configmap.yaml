@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workspace-api-config
+  namespace: contoso
+  labels:
+    app: contoso-workspace-backend
+    service: workspace
+data:
+  CommandTelemetry__ActivitySourceName: Workspace.Commands
+  CommandTelemetry__MeterName: Workspace.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Supplier.Backend
+  Logging__LogLevel__Contoso.Workspace.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Workspace.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: workspaceService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Workspace.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Infrastructure: Debug
+  Cache__PurchaseDetails__TTL: "300"
+  Cache__PurchaseHeaders__TTL: "300"
+  Cache__Suppliers__TTL: "3600"
+  ExportOptions__DefaultDomainName: workspace
+  Export__AllowedDomains__0: workspace
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: "true"
+  Export__EnableExcelExport: "true"
+  Export__EnablePdfExport: "true"
+  Export__MaxExportSize: "50000"
+  FeatureFlags__EnableAdvancedFiltering: "true"
+  FeatureFlags__EnableBulkOperations: "true"
+  FeatureFlags__EnableExport: "true"
+  FeatureFlags__EnablePromiseDateAudit: "true"
+  NotificationStore__StatusCacheTtlHours: "1"
+  ServiceBus__QueueName: excel-export-queue
+  SignalR__EnableDetailedErrors: "true"
+  SignalR__UseAzureSignalR: "false"
+  SignalR__UseRedisBackplane: "false"
+  Webhooks__AllowedHosts__0: localhost
+  Webhooks__AllowedHosts__1: 127.0.0.1
+  Webhooks__ApiKey: dev-webhook-key-12345
+  Webhooks__EnableApiKeyValidation: "false"
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.API: Debug

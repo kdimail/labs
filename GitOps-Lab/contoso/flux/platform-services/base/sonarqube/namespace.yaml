@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sonarqube
+  labels:
+    name: sonarqube
+    toolkit.fluxcd.io/tenant: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    # Pod Security Standards - Restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

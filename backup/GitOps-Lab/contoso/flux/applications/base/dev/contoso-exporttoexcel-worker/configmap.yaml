@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contoso-exporttoexcel-worker-api-config
+  namespace: contoso
+  labels:
+    app: contoso-exporttoexcel-worker
+    service: contoso-exporttoexcel-worker
+data:
+  ApiUrls__ContosoBaseUrl: "https://contoso-exporttoexcel-worker-dev.cloud.ssl.contoso-grp.com/"
+  CommandTelemetry__ActivitySourceName: Exporttoexcel.Commands
+  CommandTelemetry__MeterName: Exporttoexcel.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.ExportToExcel.Worker
+  Logging__LogLevel__LabCo-HKG91-Contoso-ExportToExcel-Worker: Debug
+  OpenTelemetry__ServiceName: Contoso.ExportToExcel.Worker
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: exportToExcelWorker
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.ExportToExcel.Worker
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-ExportToExcel-Worker.Api: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-ExportToExcel-Worker.Application: Debug
+  Serilog__MinimumLevel__Override__LabCo-HKG91-Contoso-ExportToExcel-Worker.Infrastructure: Debug
+  Logging__LogLevel__Contoso.ExportToExcel.Worker: Debug
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker.Infrastructure: Debug
+  Export__BlobContainerName: "contoso-storage-excelfiles"
+  Export__MaxRowsLimit: "100000"
+  Export__BatchSize: "5000"
+  Export__MaxFileSizeMb: "200"
+  Export__HttpTimeoutSeconds: "90"
+  Export__WebhookTimeoutSeconds: "30"
+  Export__MaxRetries: "3"
+  Export__CircuitBreakerThreshold: "10"
+  Export__CircuitBreakerDurationSeconds: "60"
+  Export__MaxConsecutiveEmptyPages: "3"
+  Export__MaxPaginationIterations: "1000"
+  Export__MaxExecutionTimeMinutes: "15"
+  Export__MaxAutoLockRenewalMinutes: "20"
+  # Export settings - configurable without redeployment 
+  Export__MaxConcurrentCalls: "3"
+  # Service Bus
+  ServiceBus__QueueName: "excel-export-queue"
+  Serilog__MinimumLevel__Override__Contoso.ExportToExcel.Worker: Debug
+  Export__CentrifugoApiUrl: http://centrifugo.centrifugo.svc.cluster.local:9000/api/publish
+  Export__AllowedWebhookHosts: "contoso-companies.com,contoso-grp.com"
+  # OpenTelemetry
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "ExportToExcel.Worker"

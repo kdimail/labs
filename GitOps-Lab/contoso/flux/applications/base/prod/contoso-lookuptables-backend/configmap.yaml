@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lookuptables-api-config
+  namespace: contoso
+  labels:
+    app: contoso-lookuptables-backend
+    service: lookuptables
+data:
+  CommandTelemetry__ActivitySourceName: Lookuptables.Commands
+  CommandTelemetry__MeterName: Lookuptables.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.LookupTables.Backend
+  Logging__LogLevel__Contoso.LookupTables.Backend: Information
+  OpenTelemetry__ServiceName: Contoso.LookupTables.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: lookuptablesService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.LookupTables.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.LookupTables.Backend.Api: Information
+  Serilog__MinimumLevel__Override__Contoso.LookupTables.Backend.Application: Information
+  Serilog__MinimumLevel__Override__Contoso.LookupTables.Backend.Infrastructure: Information

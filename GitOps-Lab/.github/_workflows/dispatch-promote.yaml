@@ -1,0 +1,76 @@
+name: Manual Promote via GitOps
+run-name: "Promote: ${{ inputs.microservice }} → ${{ inputs.targetEnvironment }}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Manually trigger a GitOps promotion for a given microservice.
+# Wraps the shared promote.yaml reusable workflow (shared_workflows).
+#
+# Promotion path:
+#   dev → qa    (targetEnvironment = qa)
+#   qa  → prod  (targetEnvironment = prod, all *-prod regions)
+#
+# Opens a PR against this repo — does NOT auto-merge.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      microservice:
+        description: "Microservice to promote"
+        required: true
+        type: choice
+        options:
+          - comment-backend
+          - logistics-backend
+          - lookuptables-backend
+          - permission-backend
+          - purchase-backend
+          - sales-backend
+          - supplier-backend
+          - workspace-backend
+      targetEnvironment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - qa
+          - prod
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ── 1. Resolve imageRepository from short microservice name ────────────────
+  resolve:
+    name: Resolve image repository
+    runs-on: [self-hosted, "Custom:WestEU"]
+    outputs:
+      imageRepository: ${{ steps.resolve.outputs.imageRepository }}
+
+    steps:
+      - name: Derive imageRepository
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          # Convert short name to dot notation expected by promote.yaml:
+          #   comment-backend  →  contoso.comment.backend
+          REPO=$(echo "${{ inputs.microservice }}" | tr '-' '.')
+          IMAGE_REPOSITORY="contoso.${REPO}"
+
+          echo "imageRepository=${IMAGE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "Resolved imageRepository: ${IMAGE_REPOSITORY}"
+
+  # ── 2. Call the shared promote reusable workflow ───────────────────────────
+  promote:
+    name: Promote to ${{ inputs.targetEnvironment }}
+    needs: resolve
+    uses: contoso-grp/shared_workflows/.github/workflows/promote.yaml@v1
+    secrets: inherit
+    with:
+      imageRepository: ${{ needs.resolve.outputs.imageRepository }}
+      fluxFolder: ${{ format('contoso-{0}', inputs.microservice) }}
+      fluxRoot: contoso/flux/applications
+      helmreleaseFile: ${{ format('{0}-helmrelease.yaml', inputs.microservice) }}
+      targetEnvironment: ${{ inputs.targetEnvironment }}

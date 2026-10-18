@@ -1,0 +1,11 @@
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nexus
+  namespace: nexus
+spec:
+  maxUnavailable: 1  # single replica: minAvailable 1 would block node drains forever
+  selector:
+    matchLabels:
+      app: nexus

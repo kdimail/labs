@@ -1,0 +1,49 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: restheart
+  namespace: flux-system
+spec:
+  interval: 12h
+  url: https://github.com/SoftInstigate/restheart
+  ref:
+    # Pinned 2026-08-20: was `branch: master`, which silently tracked upstream's dev
+    # branch (its Chart.yaml appVersion had drifted to "10.0.0-SNAPSHOT") and pulled in
+    # an Apache Tika bump that broke GridFS uploads (FileMediaTypeDetector
+    # InterceptorException, 500 on every file upload). Only bump this after testing.
+    tag: 9.7.2
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: restheart
+  namespace: flux-system
+spec:
+  interval: 1h
+  chart:
+    spec:
+      # The Helm chart lives in the chart/ subdirectory of the restheart repo
+      chart: chart
+      sourceRef:
+        kind: GitRepository
+        name: restheart
+        namespace: flux-system
+      interval: 12h
+  targetNamespace: mongodb
+  install:
+    createNamespace: false
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+    cleanupOnFail: true
+  # valuesFrom merges in order; Secret values (sensitive) override ConfigMap values
+  valuesFrom:
+    - kind: ConfigMap
+      name: restheart-values
+      valuesKey: values.yaml
+    - kind: Secret
+      name: restheart-secrets
+      valuesKey: values.yaml

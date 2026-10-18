@@ -1,0 +1,118 @@
+---
+# Cleans up old data in MONGO_DATABASE per an explicit, dev-team-confirmed retention allow-list
+# (Slack, 2026-08-20) - anything NOT listed here is intentionally kept forever, so this never
+# auto-discovers/sweeps a new collection by accident.
+# GridFS buckets (fw_traces/fw_videos/fw_screenshots) have no native cascade delete: a TTL index
+# on "<bucket>.files.uploadDate" would expire the file metadata but leave "<bucket>.chunks"
+# orphaned forever. For each matching file, chunks are deleted BEFORE the file doc - so a run
+# that dies partway through never leaves orphaned chunks, it just retries the same (still
+# present) file doc next time.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gridfs-ttl-cleanup-script
+  namespace: mongodb
+data:
+  cleanup.js: |
+    // Retention allow-list confirmed with dev team 2026-08-20 - do not add a generic
+    // "clean up everything" fallback; anything not listed here must never be deleted.
+    const gridfsBucketRetentionDays = {
+      fw_traces: 7,
+      fw_videos: 7,
+      fw_screenshots: 30,
+    };
+
+    const plainCollectionRetentionDays = {
+      backend_results: 90,
+      backend_runs: 90,
+      frontend_results: 90,
+      frontend_runs: 90,
+    };
+
+    // Confirmed with dev team 2026-08-20: all 4 plain collections use "timestamp".
+    const plainCollectionDateField = process.env.PLAIN_COLLECTION_DATE_FIELD;
+
+    const dbName = process.env.MONGO_DATABASE;
+    const database = db.getSiblingDB(dbName);
+
+    function cutoff(days) {
+      return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    }
+
+    Object.entries(gridfsBucketRetentionDays).forEach(([bucketPrefix, days]) => {
+      const filesColl = `$${bucketPrefix}.files`;
+      const chunksColl = `$${bucketPrefix}.chunks`;
+      const before = cutoff(days);
+      let deletedFiles = 0;
+      let deletedChunks = 0;
+
+      database.getCollection(filesColl).find({ uploadDate: { $lt: before } }, { _id: 1 }).forEach((doc) => {
+        const result = database.getCollection(chunksColl).deleteMany({ files_id: doc._id });
+        deletedChunks += result.deletedCount;
+        database.getCollection(filesColl).deleteOne({ _id: doc._id });
+        deletedFiles += 1;
+      });
+
+      print(`[gridfs-ttl-cleanup] bucket=$${bucketPrefix} retentionDays=$${days} deletedFiles=$${deletedFiles} deletedChunks=$${deletedChunks}`);
+    });
+
+    Object.entries(plainCollectionRetentionDays).forEach(([collName, days]) => {
+      const before = cutoff(days);
+      const result = database.getCollection(collName).deleteMany({ [plainCollectionDateField]: { $lt: before } });
+      const deletedDocs = result.deletedCount;
+      print(`[gridfs-ttl-cleanup] collection=$${collName} retentionDays=$${days} field=$${plainCollectionDateField} deletedDocs=$${deletedDocs}`);
+    });
+---
+# MONGO_DATABASE=restheart: the only database RestHeart mounts (mongo-mounts: what: /restheart),
+# so it's necessarily where the app's GridFS buckets (screenshots/traces) live.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gridfs-ttl-cleanup
+  namespace: mongodb
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: gridfs-ttl-cleanup
+              image: mongodb/mongodb-community-server:7.0.5-ubi8
+              command: ["mongosh"]
+              args:
+                - "--host=mongodb-svc.mongodb.svc.cluster.local"
+                - "--port=27017"
+                - "--authenticationDatabase=admin"
+                - "--username=admin"
+                - "--password=$(MONGODB_PASSWORD)"
+                - "--quiet"
+                - "--file=/scripts/cleanup.js"
+              env:
+                - name: MONGO_DATABASE
+                  value: "restheart"
+                - name: PLAIN_COLLECTION_DATE_FIELD
+                  value: "timestamp"
+                - name: MONGODB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: mongodb-admin-password
+                      key: password
+              volumeMounts:
+                - name: cleanup-script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  memory: 128Mi
+                  cpu: 50m
+                limits:
+                  memory: 256Mi
+                  cpu: 250m
+          volumes:
+            - name: cleanup-script
+              configMap:
+                name: gridfs-ttl-cleanup-script

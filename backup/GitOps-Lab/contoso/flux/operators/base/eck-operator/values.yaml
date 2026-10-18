@@ -1,0 +1,183 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eck-operator-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    # Production-grade ECK Operator Configuration
+    
+    # Operator image configuration
+    image:
+      repository: docker.elastic.co/eck/eck-operator
+      pullPolicy: IfNotPresent
+    
+    # Replicas for high availability
+    replicaCount: 3
+    
+    # Resource limits and requests for production
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    
+    # Pod disruption budget for HA
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    
+    # Security context
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      capabilities:
+        drop:
+          - ALL
+    
+    # Service account
+    serviceAccount:
+      create: true
+      annotations: {}
+      name: "elastic-operator"
+    
+    # RBAC
+    rbac:
+      create: true
+    
+    # Manage all namespaces
+    installCRDs: true
+    managedNamespaces: []  # Empty = all namespaces
+    
+    # Webhook configuration
+    webhook:
+      enabled: true
+      port: 9443
+      certManagerEnabled: false  # Set to true if using cert-manager
+      
+      # Webhook resources
+      resources:
+        limits:
+          cpu: 200m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+    
+    # Soft multi-tenancy
+    softMultiTenancy:
+      enabled: false
+    
+    # Configuration for operator
+    config:
+      # Log level: debug, info, warn, error
+      logLevel: info
+      
+      # Metrics port
+      metricsPort: 8080
+      
+      # Container registry for Elastic stack images
+      containerRegistry: docker.elastic.co
+      
+      # Maximum concurrent reconciles
+      maxConcurrentReconciles: 3
+      
+      # Set container repository suffix (for air-gapped environments)
+      # containerSuffix: ""
+      
+      # Validation webhook
+      validateStorageClass: true
+      
+      # Enable tracing
+      enableTracing: false
+      
+      # Distribution channel for telemetry
+      distributionChannel: "helm"
+    
+    # Telemetry (disable for production unless you want to share data with Elastic)
+    telemetry:
+      disabled: true
+    
+    # Node affinity for operator pods
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  control-plane: elastic-operator
+              topologyKey: kubernetes.io/hostname
+    
+    # Tolerations
+    tolerations: []
+    
+    # Node selector
+    nodeSelector: {}
+    
+    # Priority class
+    priorityClassName: ""
+    
+    # Enable leader election for HA
+    leaderElection:
+      enabled: true
+    
+    # Service monitor for Prometheus (if using Prometheus Operator)
+    prometheus:
+      enabled: true
+      podMonitor:
+        enabled: true
+        labels: {}
+        annotations: {}
+        interval: 30s
+        scrapeTimeout: 10s
+    
+    # Additional environment variables
+    env: []
+    
+    # Additional volumes
+    volumes: []
+    volumeMounts: []
+    
+    # Pod labels
+    podLabels: {}
+    
+    # Pod annotations
+    podAnnotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "8080"
+      prometheus.io/path: "/metrics"
+    
+    # Service annotations
+    serviceAnnotations: {}
+    
+    # Global kubeAPIServerIP (if needed for webhook)
+    kubeAPIServerIP: ""
+    
+    # Tracing configuration
+    tracing:
+      enabled: false
+    
+    # Refs validation
+    refs:
+      enforceRBAC: false
+    
+    # Expose metrics service
+    createClusterScopedResources: true
+    
+    # Webhook certificate management
+    webhookCertificates:
+      # Auto-generate certificates
+      caBundle: ""
+      certValidity: 8760h  # 1 year

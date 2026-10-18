@@ -1,0 +1,11 @@
+---
+# HelmRepository
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cloudnative-postgres-helm-repo
+  namespace: flux-system
+spec: 
+  interval: 1m
+  url: https://cloudnative-pg.github.io/charts
+

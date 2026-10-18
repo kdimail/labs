@@ -1,0 +1,15 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base/reloader
+  - ../../base/secret-stores
+  - ../../base/tls-wild-cluster-external-secret.yaml
+  - ../../base/values/values-fluent-bit-contoso-westus3-prod.yaml
+  - ../../base/fluent-bit
+  - ../../base/values/values-monitoring-contoso-westus3-prod.yaml
+  - ../../base/monitoring
+  - ../../base/netshoot/netshoot-deployment.yaml
+  - ../../base/centrifugo
+  - ../../base/ingresses/ingress-centrifugo-wus3-prod.yaml

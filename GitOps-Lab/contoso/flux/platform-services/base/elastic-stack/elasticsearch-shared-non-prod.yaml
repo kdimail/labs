@@ -1,0 +1,350 @@
+# Elasticsearch Cluster - Non-Prod (shared-non-prod) Configuration for AKS
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: production-es
+  namespace: elastic-stack
+spec:
+  version: 8.12.0
+
+  # Custom roles and file realm extension for logstash writer permissions
+  auth:
+    roles:
+      - secretName: logstash-contoso-roles
+    fileRealm:
+      - secretName: logstash-contoso-filerealm
+
+  # HTTP configuration
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: false
+    service:
+      spec:
+        type: ClusterIP
+
+  # Node sets configuration
+  nodeSets:
+    # Master node - single node is fine for nonprod (no quorum needed with count 1)
+    - name: master
+      count: 1
+      config:
+        node.roles: ["master"]
+        xpack.ml.enabled: false
+        xpack.security.transport.ssl.verification_mode: certificate
+
+      podTemplate:
+        metadata:
+          labels:
+            role: master
+            node-type: master
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: production-es
+                      elasticsearch.k8s.elastic.co/statefulset-name: production-es-master
+                  topologyKey: kubernetes.io/hostname
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: production-es
+                      elasticsearch.k8s.elastic.co/statefulset-name: production-es-master
+                  topologyKey: topology.kubernetes.io/zone
+
+          # Init container for sysctl settings
+          initContainers:
+            - name: sysctl
+              securityContext:
+                privileged: true
+                runAsUser: 0
+              command:
+                - sh
+                - -c
+                - sysctl -w vm.max_map_count=262144
+
+          containers:
+            - name: elasticsearch
+              securityContext:
+                privileged: false
+                runAsNonRoot: true
+                runAsUser: 1000
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms1g -Xmx1g"
+              resources:
+                requests:
+                  memory: 4Gi
+                  cpu: 100m
+                limits:
+                  memory: 4Gi
+                  cpu: 1000m
+
+              startupProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 10
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 30
+
+              livenessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 60
+                periodSeconds: 30
+                timeoutSeconds: 15
+                failureThreshold: 5
+
+              readinessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 12
+                successThreshold: 1
+                timeoutSeconds: 12
+
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 50Gi
+            storageClassName: managed-premium-sc-tags
+
+    # Data node - single node for nonprod (indices use number_of_replicas: 0, see
+    # contoso-logs-template)
+    - name: data
+      count: 1
+      config:
+        node.roles: ["data", "ingest"]
+        cluster.routing.allocation.disk.watermark.low: "80%"
+        cluster.routing.allocation.disk.watermark.high: "85%"
+        cluster.routing.allocation.disk.watermark.flood_stage: "90%"
+        cluster.info.update.interval: "1m"
+        xpack.ml.enabled: false
+        xpack.security.transport.ssl.verification_mode: certificate
+
+      podTemplate:
+        metadata:
+          labels:
+            role: data
+            node-type: data
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: production-es
+                      elasticsearch.k8s.elastic.co/statefulset-name: production-es-data
+                  topologyKey: kubernetes.io/hostname
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: production-es
+                      elasticsearch.k8s.elastic.co/statefulset-name: production-es-data
+                  topologyKey: topology.kubernetes.io/zone
+
+          initContainers:
+            - name: sysctl
+              securityContext:
+                privileged: true
+                runAsUser: 0
+              command:
+                - sh
+                - -c
+                - sysctl -w vm.max_map_count=262144
+
+          containers:
+            - name: elasticsearch
+              securityContext:
+                privileged: false
+                runAsNonRoot: true
+                runAsUser: 1000
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms1500m -Xmx1500m"
+              resources:
+                requests:
+                  memory: 4Gi
+                  cpu: 200m
+                limits:
+                  memory: 4Gi
+                  cpu: 2000m
+
+              startupProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 10
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 30
+
+              livenessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 60
+                periodSeconds: 30
+                timeoutSeconds: 15
+                failureThreshold: 5
+
+              readinessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 12
+                successThreshold: 1
+                timeoutSeconds: 12
+
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                # Was 100Gi - already full (data-0 at 100%, data-2 at 93%) since contoso-logs-*
+                # never had a matching ILM policy to delete old indices (see
+                # ilm-setup-contoso-logs-nonprod-job.yaml). Bumped for immediate headroom; ILM now
+                # caps growth going forward.
+                storage: 300Gi
+            storageClassName: managed-premium-sc-tags
+
+    # Coordinating node - single node for nonprod
+    - name: coordinating
+      count: 1
+      config:
+        node.roles: []
+        xpack.ml.enabled: false
+        xpack.security.transport.ssl.verification_mode: certificate
+
+      podTemplate:
+        metadata:
+          labels:
+            role: coordinating
+            node-type: coordinating
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        elasticsearch.k8s.elastic.co/cluster-name: production-es
+                        elasticsearch.k8s.elastic.co/statefulset-name: production-es-coordinating
+                    topologyKey: kubernetes.io/hostname
+
+          initContainers:
+            - name: sysctl
+              securityContext:
+                privileged: true
+                runAsUser: 0
+              command:
+                - sh
+                - -c
+                - sysctl -w vm.max_map_count=262144
+
+          containers:
+            - name: elasticsearch
+              securityContext:
+                privileged: false
+                runAsNonRoot: true
+                runAsUser: 1000
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms2g -Xmx2g"
+              resources:
+                requests:
+                  memory: 6Gi
+                  cpu: 100m
+                limits:
+                  memory: 6Gi
+                  cpu: 2000m
+
+              startupProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 10
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 30
+
+              livenessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                initialDelaySeconds: 60
+                periodSeconds: 30
+                timeoutSeconds: 15
+                failureThreshold: 5
+
+              readinessProbe:
+                exec:
+                  command:
+                  - bash
+                  - -c
+                  - |
+                    curl -s -k https://localhost:9200 | grep -q "missing authentication credentials"
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 12
+                successThreshold: 1
+                timeoutSeconds: 12
+
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 20Gi
+            storageClassName: managed-premium-sc-tags
+
+  # Pod disruption budget for safe maintenance
+  podDisruptionBudget:
+    spec:
+      minAvailable: 2
+      selector:
+        matchLabels:
+          elasticsearch.k8s.elastic.co/cluster-name: production-es

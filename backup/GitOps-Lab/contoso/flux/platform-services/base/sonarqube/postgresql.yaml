@@ -1,0 +1,170 @@
+---
+# PostgreSQL StatefulSet for SonarQube
+# Production recommendation: Use Azure Database for PostgreSQL instead
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sonarqube-postgresql
+  namespace: sonarqube
+  labels:
+    app: postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: sonarqube
+    app.kubernetes.io/component: database
+spec:
+  serviceName: sonarqube-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+      app.kubernetes.io/instance: sonarqube
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        app.kubernetes.io/name: postgresql
+        app.kubernetes.io/instance: sonarqube
+        app.kubernetes.io/component: database
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: sonarqube-postgresql
+      
+      securityContext:
+        fsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+        - name: postgresql
+          image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          
+          env:
+            - name: POSTGRES_DB
+              value: sonarqube
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sonarqube-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sonarqube-db-credentials
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Performance tuning
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF8 --locale=C"
+          
+          # Production-sized resources
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U sonarqube -d sonarqube
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U sonarqube -d sonarqube
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      
+      terminationGracePeriodSeconds: 60
+      
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: agentpool
+                    operator: In
+                    values:
+                      - infra
+  
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: managed-premium-sc-tags
+        resources:
+          requests:
+            storage: 20Gi
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarqube-postgresql
+  namespace: sonarqube
+  labels:
+    app: postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: sonarqube
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+  selector:
+    app: postgresql
+    app.kubernetes.io/instance: sonarqube
+---
+# ServiceAccount for PostgreSQL
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sonarqube-postgresql
+  namespace: sonarqube
+  labels:
+    app: postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: sonarqube
+automountServiceAccountToken: false

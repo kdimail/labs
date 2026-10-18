@@ -1,0 +1,194 @@
+name: Auto-approve & merge GitOps PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+env:
+  MANIFESTS_FOLDER_PREFIX: contoso/flux/applications/base/
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: autopromote-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-approve:
+    name: Validate and approve
+    runs-on: ubuntu-latest
+    outputs:
+      env_label: ${{ steps.scope.outputs.env_label }}
+    if: >-
+      startsWith(github.head_ref, 'deploy/dev/') ||
+      startsWith(github.head_ref, 'promote/qa/') ||
+      startsWith(github.head_ref, 'hotfix-promote/qa/') ||
+      startsWith(github.head_ref, 'cleanup/dev/') ||
+      startsWith(github.head_ref, 'cleanup/qa/') ||
+      startsWith(github.head_ref, 'cleanup/prod/') ||
+      startsWith(github.head_ref, 'onboard/')
+
+    steps:
+      - name: Determine allowed manifest paths
+        id: scope
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          BASE="${{ env.MANIFESTS_FOLDER_PREFIX }}"
+          OVERLAYS="contoso/flux/applications/overlays/"
+
+          # ALLOWED_PREFIXES is a bash array of path prefixes.
+          # All changed files must start with at least one entry.
+          ALLOWED_PREFIXES=()
+
+          if [[ "${BRANCH}" == deploy/dev/* ]]; then
+            ALLOWED_PREFIXES+=("${BASE}dev/")
+            ENV_LABEL="dev"
+
+          elif [[ "${BRANCH}" == hotfix-promote/qa/* ]]; then
+            # Hotfix QA promotion touches: QA base+overlay (add hotfix), DEV base+overlay (remove hotfix)
+            ALLOWED_PREFIXES+=("${BASE}dev/" "${OVERLAYS}dev/")
+            ALLOWED_PREFIXES+=("${BASE}qa/"  "${OVERLAYS}qa/")
+            ENV_LABEL="hotfix-qa-promotion"
+
+          elif [[ "${BRANCH}" == promote/qa/* ]]; then
+            ALLOWED_PREFIXES+=("${BASE}qa/")
+            # Promote also updates the overlay kustomization for the env it
+            # promoted to (same fix as hotfix-promote/qa above).
+            ALLOWED_PREFIXES+=("${OVERLAYS}qa/")
+            ENV_LABEL="qa"
+
+          elif [[ "${BRANCH}" == cleanup/dev/* ]]; then
+            ALLOWED_PREFIXES+=("${BASE}dev/" "${OVERLAYS}dev/")
+            ENV_LABEL="dev-cleanup"
+
+          elif [[ "${BRANCH}" == cleanup/qa/* ]]; then
+            ALLOWED_PREFIXES+=("${BASE}qa/" "${OVERLAYS}qa/")
+            ENV_LABEL="qa-cleanup"
+
+          elif [[ "${BRANCH}" == onboard/* ]]; then
+            # Onboarding PR: new service base files (all envs) + overlay updates
+            ALLOWED_PREFIXES+=("${BASE}")
+            ALLOWED_PREFIXES+=("contoso/flux/applications/overlays/")
+            ENV_LABEL="onboard"
+
+          elif [[ "${BRANCH}" == cleanup/prod/* ]]; then
+            # Prod cleanup touches base/*-prod/ and overlays/*-prod/ (wildcard — validated per file below)
+            ALLOWED_PREFIXES+=("__prod_wildcard__")
+            ENV_LABEL="prod-cleanup"
+
+          else
+            echo "::error::Unexpected branch prefix: ${BRANCH}"
+            exit 1
+          fi
+
+          # If this is a hotfix branch under deploy/* or promote/*,
+          # also allow changes to the overlay kustomization for that environment.
+          if [[ "${BRANCH}" =~ ^(deploy|promote)/([^/]+)/hotfix- ]]; then
+            ENV_FROM_BRANCH="${BASH_REMATCH[2]}"
+            ALLOWED_PREFIXES+=("${OVERLAYS}${ENV_FROM_BRANCH}/")
+          fi
+
+          # Serialize array to GITHUB_OUTPUT using the EOF heredoc delimiter
+          echo "allowed_prefixes<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${ALLOWED_PREFIXES[@]}" >> "$GITHUB_OUTPUT"
+          echo "EOF"                   >> "$GITHUB_OUTPUT"
+          echo "env_label=${ENV_LABEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify all changes are under the allowed paths
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ALLOWED_PREFIXES_STR: ${{ steps.scope.outputs.allowed_prefixes }}
+          ENV_LABEL: ${{ steps.scope.outputs.env_label }}
+        run: |
+          set -euo pipefail
+
+          # Reconstruct array from the multiline output value
+          mapfile -t ALLOWED_PREFIXES <<< "${ALLOWED_PREFIXES_STR}"
+
+          # Fetch all changed file paths
+          CHANGED_FILES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '[.files[].path]')
+
+          OUTSIDE=""
+          while IFS= read -r FILE; do
+            ALLOWED=false
+
+            if [ "${#ALLOWED_PREFIXES[@]}" -eq 1 ] && [ "${ALLOWED_PREFIXES[0]}" = "__prod_wildcard__" ]; then
+              # For prod cleanup: file must be under base/*-prod/ or overlays/*-prod/
+              if echo "${FILE}" | grep -qE '^contoso/flux/applications/(base|overlays)/[^/]+-prod/'; then
+                ALLOWED=true
+              fi
+            else
+              # Check the file against each prefix in the array
+              for PREFIX in "${ALLOWED_PREFIXES[@]}"; do
+                if [[ "${FILE}" == ${PREFIX}* ]]; then
+                  ALLOWED=true
+                  break
+                fi
+              done
+            fi
+
+            if [ "${ALLOWED}" = "false" ]; then
+              OUTSIDE="${OUTSIDE}  ${FILE}\n"
+            fi
+          done < <(echo "${CHANGED_FILES}" | jq -r '.[]')
+
+          if [ -n "${OUTSIDE}" ]; then
+            echo "::error::PR contains changes outside allowed paths for '${ENV_LABEL}':"
+            printf "${OUTSIDE}"
+            exit 1
+          fi
+
+          echo "All changes are within allowed paths (${ENV_LABEL}) — proceeding."
+
+      - name: Approve PR
+        env:
+          # If the PR is opened by the same github-actions[bot] identity that runs
+          # this workflow, GitHub will reject the self-approval. In that case swap
+          # GITHUB_TOKEN here for a PAT stored as a repository secret, e.g.:
+          #   GH_TOKEN: ${{ secrets.APPROVE_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ENV_LABEL: ${{ steps.scope.outputs.env_label }}
+        run: |
+          gh pr review "$PR_NUMBER" --repo "$REPO" --approve \
+            --body "Auto-approved: all changes are scoped to allowed paths for \`$ENV_LABEL\`."
+
+  merge:
+    name: Merge PR and delete branch
+    needs: validate-and-approve
+    runs-on: ubuntu-latest
+    # Shared (not per-PR) concurrency group: only ONE merge happens at a time
+    # across ALL PRs in this repo. Several onboarding/bulk-onboard runs can open
+    # PRs within seconds of each other; merging them one at a time avoids the
+    # "Base branch was modified" GraphQL race that happens when two merges hit
+    # `main` at nearly the same moment.
+    concurrency:
+      group: apps-gitops-merge-queue
+      cancel-in-progress: false
+    steps:
+      - name: Merge PR and delete branch (with retry)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch \
+                 --subject "Auto-merge: ${PR_TITLE}"; then
+              echo "✓ Merged PR #${PR_NUMBER}"
+              exit 0
+            fi
+            echo "::warning::Merge attempt ${i} for PR #${PR_NUMBER} failed (likely a base-branch race) — retrying in $((i * 5))s..."
+            sleep $((i * 5))
+          done
+          echo "::error::Failed to merge PR #${PR_NUMBER} after 5 attempts"
+          exit 1

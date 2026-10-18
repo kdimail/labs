@@ -1,0 +1,15 @@
+---
+# Pod Disruption Budget for Kibana
+# Ensures high availability during voluntary disruptions (node drains, updates, etc.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: production-kb-pdb
+  namespace: elastic-stack
+  labels:
+    app: kibana
+spec:
+  maxUnavailable: 1  # non-prod runs 1 replica; minAvailable would block node drains
+  selector:
+    matchLabels:
+      kibana.k8s.elastic.co/name: production-kb

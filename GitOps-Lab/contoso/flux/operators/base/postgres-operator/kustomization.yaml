@@ -1,0 +1,14 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DO NOT set a global namespace - it causes cross-namespace reference issues
+# - HelmRepository must be in flux-system for cross-component access
+# - Namespace resource is in monitoring
+# Each resource file explicitly declares its namespace
+
+resources:
+  - namespace.yaml
+  - helmrepository.yaml
+  - configmap.yaml
+  - helmrelease.yaml

@@ -1,0 +1,244 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-grafana-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    ## PRODUCTION-READY PROMETHEUS + GRAFANA VALUES
+    ## Last Updated: 2026-01-01
+    ## All sensitive values externalized to Secrets
+
+
+    ## GLOBAL CONFIGURATION ##
+    nameOverride: ""
+    fullnameOverride: ""
+
+
+    ## PROMETHEUS CONFIGURATION ##
+    prometheus:
+      ingress:
+        enabled: true
+        ingressClassName: webapprouting.kubernetes.azure.com
+        annotations: {}
+        hosts:
+          - prometheus-contoso-swn-prod.contosogrp-cloud.com
+        paths:
+          - /
+        pathType: Prefix
+        tls:
+          - secretName: ssl-contoso-grp-com-tls
+            hosts:
+              - prometheus-contoso-swn-prod.contosogrp-cloud.com
+
+      # ServiceAccount for Workload Identity
+      serviceAccount:
+        create: true
+        name: prometheus-operator
+        annotations:
+          azure.workload.identity/use: "true"
+
+      prometheusSpec:
+        # ===== HIGH AVAILABILITY =====
+        replicas: 2
+        podAntiAffinity: "hard"  # Spread replicas across nodes
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
+
+        # ===== RESOURCE MANAGEMENT =====
+        # Adjust based on cluster size and workload metrics collected
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: 1000m
+
+        # ===== DATA RETENTION =====
+        retention: 15d        # Keep 15 days of metrics
+        retentionSize: "100GB" # OR storage limit, whichever is smaller
+
+        # ===== PERSISTENT STORAGE ON AZURE =====
+        # Uses managed-csi storage class (Azure Managed Disks with CSI driver)
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: managed-premium-sc-tags  # Premium managed disk
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 150Gi  # Sized for 15d retention
+
+        # ===== WORKLOAD IDENTITY SETUP FOR REMOTE WRITE =====
+        # (Optional) Enable if sending metrics to Azure Monitor/Log Analytics
+        # Step 1: Create User-Assigned Managed Identity in Azure
+        # Step 2: Grant "Monitoring Metrics Publisher" role to the identity
+        # Step 3: Create federated credential linking SA to the identity
+        # Step 4: Uncomment serviceAccountName below
+        # serviceAccountName: prometheus-operator
+        
+        # Remote write to Azure Monitor (Optional)
+        # remoteWrite:
+        # - url: https://<location>.monitoring.azure.com/api/prometheus/api/v1/write
+        #   queueConfig:
+        #     capacity: 10000
+        #     maxShards: 200
+        #     minShards: 1
+        #     maxSamplesPerSend: 1000
+        #     batchSendWaitTime: 5s
+        #     minBackoff: 30ms
+        #     maxBackoff: 100ms
+        #   writeRelabelConfigs:
+        #     - sourceLabels: [__name__]
+        #       regex: 'up|container_.*|node_.*'
+        #       action: keep
+
+        # ===== PROMETHEUS RBAC =====
+        rbac:
+          create: true
+
+        # ===== SERVICE MONITOR SELECTOR =====
+        serviceMonitorSelector: {}  # Auto-discover all ServiceMonitors
+        serviceMonitorNamespaceSelector: {}
+
+        # ===== ALERTING =====
+        alertingRules:
+          {}
+          # Create alerting rules in separate PrometheusRule CRs
+          
+
+
+    ## ALERTMANAGER CONFIGURATION ##
+    alertmanager:
+      alertmanagerSpec:
+        # ===== HIGH AVAILABILITY =====
+        replicas: 2
+        podAntiAffinity: "hard"
+        retention: 120h  # Keep 5 days of alerts
+
+        # ===== RESOURCE MANAGEMENT =====
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+
+        # ===== PERSISTENT STORAGE =====
+        storage:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: managed-premium-sc-tags
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+
+      # ===== ALERT ROUTING CONFIGURATION =====
+      config:
+        global:
+          resolve_timeout: 5m
+          
+        # Route alerts to appropriate receivers
+        route:
+          receiver: "default"
+          group_by: ["alertname", "cluster", "service"]
+          group_wait: 10s
+          group_interval: 10s
+          repeat_interval: 12h
+          routes:
+            - receiver: "ops-team"
+              group_by: ["severity"]
+              matchers:
+                - severity: "critical"
+              continue: true
+            
+            - receiver: "dev-team"
+              matchers:
+                - severity: "warning"
+
+        # Example receivers (configure based on your needs)
+        receivers:
+          - name: "default"
+            # Example: Send to PagerDuty, Slack, etc.
+            # pagerduty_configs:
+            #   - service_key: "${PAGERDUTY_SERVICE_KEY}"
+            # slack_configs:
+            #   - api_url: "${SLACK_WEBHOOK_URL}"
+
+          - name: "ops-team"
+            # Critical alerts to ops team
+
+          - name: "dev-team"
+            # Dev alerts
+
+
+    ## PROMETHEUS OPERATOR CONFIGURATION ##
+    prometheusOperator:
+      enabled: true
+      manageCrds: true  # Manages PrometheusRule CRDs
+
+      # RBAC for operator
+      rbac:
+        create: true
+
+
+    ## NODE EXPORTER (System metrics) ##
+    nodeExporter:
+      enabled: true
+      
+      resources:
+        requests:
+          memory: 64Mi
+          cpu: 50m
+        limits:
+          memory: 128Mi
+          cpu: 200m
+
+
+    ## KUBE-STATE-METRICS ##
+    kubeStateMetrics:
+      enabled: true
+      
+      resources:
+        requests:
+          memory: 128Mi
+          cpu: 100m
+        limits:
+          memory: 256Mi
+          cpu: 500m
+
+
+    ## PROMETHEUS-WINDOWS-EXPORTER (If Windows nodes exist) ##
+    windowsMonitoring:
+      enabled: false  # Enable if using Windows nodes
+
+
+    ## NETWORK POLICIES (Optional but recommended) ##
+    # Enable if using Calico or other CNI with network policy support
+    networkPolicy:
+      enabled: false
+      ingress:
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  name: monitoring
+            - podSelector:
+                matchLabels:
+                  app: prometheus
+        - ports:
+            - protocol: TCP
+              port: 9090
+
+
+---

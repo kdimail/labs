@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kibana
+  namespace: elastic-stack
+  annotations:
+    # Backend protocol - Kibana uses HTTPS
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Proxy settings
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  rules:
+  - host: kibana-contoso-shared-non-prod.${domain_filter}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: production-kb-kb-http
+            port:
+              number: 5601
+  tls:
+  - hosts:
+    - kibana-contoso-shared-non-prod.${domain_filter}
+    secretName: ssl-contoso-grp-com-tls

@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: contoso-microservices
+    type: shared-config
+  name: contoso-app-config
+  namespace: contoso
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+  APP_STAGE: QA
+  ASPNETCORE_URLS: http://+:8080
+  Authz__BaseUrl: "https://contoso-authorization-backend-qa.contosogrp-cloud.com/"
+  Authz__CacheTtl: "00:00:10"
+  CommandTelemetry__MeterVersion: 1.0.0
+  Cors__AllowedHostSuffix: ssl.contoso-grp.com
+  ElasticApm__Enabled: "true"
+  ElasticApm__Environment: QA
+  ElasticApm__LogLevel: Information
+  ElasticApm__ServerUrls: https://otel-contoso-shared-non-prod.contosogrp-cloud.com
+  ElasticApm__VerifyServerCert: "true"
+  ExportOptions__AllowLocalWebhooks: "false"
+  ExportOptions__AllowedDomains__0: purchase
+  ExportOptions__AllowedDomains__1: api
+  ExportOptions__QueueName: excel-export-queue-qa
+  ExportOptions__TrustedHosts__0: otel-contoso-shared-non-prod.contosogrp-cloud.com
+  ExportOptions__WebhookMode: Static
+  ExportOptions__WebhookUrl: TODO
+  Export__AllowedDomains__0: purchase
+  Export__AllowedDomains__1: api
+  Export__MaxExportSize: "50000"
+  Export__TrustedHosts__0: otel-contoso-shared-non-prod.contosogrp-cloud.com
+  KeyVault__Enabled: "false"
+  Logging__LogLevel__Default: Information
+  Logging__LogLevel__Microsoft: Warning
+  Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: Warning
+  LogstashUri: https://logstash-logs-contoso-shared-non-prod.contosogrp-cloud.com/
+  OpenTelemetry__OtlpEndpoint: https://otel-contoso-shared-non-prod.contosogrp-cloud.com/
+  OpenTelemetry__ServiceName: Contoso.Purchase.Backend.Api
+  Serilog__InfluxDb__ApplicationName: purchaseService
+  Serilog__InfluxDb__BucketName: contoso_logging
+  Serilog__InfluxDb__InstanceName: production
+  Serilog__WriteTo__0__Name: Console
+  Serilog__WriteTo__1__Args__endpoint: https://otel-contoso-shared-non-prod.contosogrp-cloud.com/
+  Serilog__WriteTo__1__Args__protocol: HttpProtobuf
+  # ServiceBus__NamespaceFQDN: westeu-contosotoexcel-messaging.servicebus.windows.net
+  ServiceBus__QueueName: excel-export-queue
+  Serilog__MinimumLevel__Default: Debug
+  Serilog__MinimumLevel__Override__Microsoft: Information
+  Serilog__MinimumLevel__Override__Microsoft.AspNetCore: Information
+  Serilog__MinimumLevel__Override__Microsoft.EntityFrameworkCore: Information
+  Serilog__MinimumLevel__Override__Microsoft.EntityFrameworkCore.Database.Command: Debug
+  Serilog__MinimumLevel__Override__Microsoft.EntityFrameworkCore.Infrastructure: Warning
+  Serilog__MinimumLevel__Override__System: Warning
+  Serilog__WriteTo__0__Args__outputTemplate: '[{Timestamp:HH:mm:ss} {Level:u3}] [{Layer}] [{ShortSourceContext}] {Message:lj}{NewLine}{Exception}'
+  Serilog__WriteTo__1__Name: Debug
+  Serilog__WriteTo__1__Args__outputTemplate: '[{Timestamp:HH:mm:ss} {Level:u3}] [{Layer}] [{ShortSourceContext}] {Message:lj}{NewLine}{Exception}'
+  Serilog__WriteTo__2__Name: OpenTelemetry
+  Serilog__WriteTo__2__Args__endpoint: https://otel-contoso-shared-non-prod.contosogrp-cloud.com/v1/
+  Serilog__WriteTo__2__Args__protocol: HttpProtobuf
+  Serilog__Enrich__0: FromLogContext
+  Serilog__Enrich__1: WithMachineName
+  Serilog__Enrich__2: WithThreadId
+  PermissionBackend__BaseUrl: https://contoso-permission-backend-qa.contosogrp-cloud.com
+  ApiUrls__WorkflowUrl: https://contoso-workflow-backend-qa.contosogrp-cloud.com
+  ApiUrls__AccessoriesUrl: https://contoso-accessories-backend-qa.ssl.contoso-grp.com
+  ApiUrls__CommentUrl: https://contoso-comment-backend-qa.ssl.contoso-grp.com
+  ApiUrls__CrmUrl: https://contoso-crm-backend-qa.ssl.contoso-grp.com
+  ApiUrls__ExportToExcelUrl: https://contoso-exporttoexcel-backend-qa.contosogrp-cloud.com
+  ApiUrls__FinanceUrl: https://contoso-finance-backend-qa.contosogrp-cloud.com
+  ApiUrls__InventoryUrl: https://contoso-inventory-backend-qa.contosogrp-cloud.com
+  ApiUrls__LogisticsUrl: https://contoso-logistics-backend-qa.contosogrp-cloud.com
+  ApiUrls__LookupTablesUrl: https://contoso-lookuptables-backend-qa.contosogrp-cloud.com
+  ApiUrls__ManufacturingUrl: https://contoso-manufacturing-backend-qa.contosogrp-cloud.com
+  ApiUrls__PermissionUrl: https://contoso-permission-backend-qa.contosogrp-cloud.com
+  ApiUrls__PurchaseUrl: https://contoso-purchase-backend-qa.contosogrp-cloud.com
+  ApiUrls__SalesUrl: https://contoso-sales-backend-qa.contosogrp-cloud.com
+  ApiUrls__SupplierUrl: https://contoso-supplier-backend-qa.contosogrp-cloud.com
+  ApiUrls__WorkspaceUrl: https://contoso-workspace-backend-qa.contosogrp-cloud.com
+  IcuEnabledRegions__0: ISRAEL
+  IcuEnabledRegions__1: BELGIUM
+  OpenId__ClientIds__2: https://contoso-mcp.ssl.contoso-grp.com

@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-secrets-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    # --- Replicas and leader election
+    replicaCount: 3
+    leaderElect: true
+
+    # --- Controller global settings
+    global:
+      nodeSelector: {}
+      tolerations: []
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: "topology.kubernetes.io/zone"
+          whenUnsatisfiable: ScheduleAnyway
+          matchLabelKeys:
+            - pod-template-hash
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: external-secrets
+              topologyKey: kubernetes.io/hostname
+      compatibility:
+        openshift:
+          adaptSecurityContext: disabled
+
+    # --- Image settings
+    image:
+      repository: ghcr.io/external-secrets/external-secrets
+      tag: "v1.1.1"
+      pullPolicy: IfNotPresent
+      flavour: ""
+
+    #installCRDs: true
+    crds:
+      create: true
+      
+    # --- ServiceAccount (Azure Workload Identity)
+    serviceAccount:
+      # CHANGE: Must be true for the chart to create the SA and apply the annotation
+      create: true 
+      name: external-secrets-sa
+      annotations:
+        # NOTE: Ensure your Flux Kustomization has 'postBuild' substitution enabled for this variable
+        azure.workload.identity/client-id: "${eso_client_id}" 
+      automount: true
+
+    # --- RBAC
+    rbac:
+      create: true
+      aggregateToView: true
+      aggregateToEdit: true
+
+    # --- Controller class
+    # CHANGE: Commented out. Only enable this if you are running multiple ESO instances 
+    # and need to shard them. Leaving this enabled prevents ESO from processing 
+    # standard SecretStores that don't explicitly specify this controller class.
+    # controllerClass: azure
+
+    # --- ExternalSecrets processing
+    processClusterExternalSecret: true
+    processClusterPushSecret: true
+    processClusterStore: true
+    processSecretStore: true
+    processClusterGenerator: true
+    processPushSecret: true
+
+    # --- Security context
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      enabled: true
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      seccompProfile:
+        type: RuntimeDefault
+
+    podSecurityContext:
+      enabled: true
+
+    # --- Resources
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 250m
+        memory: 512Mi
+
+    # --- Webhook
+    webhook:
+      resources:
+        requests:
+          cpu: 50m 
+          memory: 250Mi
+        limits:
+          cpu: 250m 
+          memory: 512Mi
+      create: true
+      hostNetwork: false
+      replicaCount: 3
+      # CHANGE: Cleaned up cert configuration.
+      # We disable certManager to let ESO generate its own self-signed certs for internal 
+      # communication. (LetsEncrypt cannot be used for internal .svc.cluster.local domains).
+      certManager:
+        enabled: false
+        addInjectorAnnotations: true
+
+    # --- Metrics
+    serviceMonitor:
+      enabled: false  # Disabled to avoid dependency on monitoring namespace
+      # renderMode: skipIfMissing
+      # namespace: monitoring
+      interval: 30s
+      scrapeTimeout: 10s
+
+    metrics:
+      service:
+        enabled: true
+        port: 8080
+
+    # --- Optional generic targets
+    genericTargets:
+      enabled: false
+      resources: []
+
+    # --- PodDisruptionBudget
+    podDisruptionBudget:
+      enabled: true
+      maxUnavailable: 1  # chart prefers this over minAvailable; minAvailable 2 blocked drains
+
+    # --- DNS / Pod spec extra
+    dnsPolicy: ClusterFirst
+    dnsConfig: {}
+    podSpecExtra: {}

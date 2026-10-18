@@ -1,0 +1,28 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base/reloader
+  - ../../base/secret-stores
+  - ../../base/tls-wild-cluster-external-secret.yaml
+  - ../../base/values/values-fluent-bit-contoso-westus3-shared-prod.yaml
+  - ../../base/fluent-bit
+  - ../../base/values/values-monitoring-contoso-westus3-shared-prod.yaml
+  - ../../base/monitoring/externalsecret.yaml
+  - ../../base/monitoring
+  - ../../base/ingresses/ingress-apm-westus3-shared-prod.yaml
+  - ../../base/ingresses/ingress-kibana-westus3-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-logs-westus3-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-performance-westus3-shared-prod.yaml
+  - ../../base/ingresses/ingress-logstash-apitest-westus3-shared-prod.yaml
+  - ../../base/ingresses/ingress-otel-westus3-shared-prod.yaml
+  - ../../base/elastic-stack
+  - ../../base/elastic-stack/elasticsearch-shared-prod.yaml
+  - ../../base/elastic-stack/logstash-shared-prod.yaml
+  - ../../base/elastic-stack/kibana-wus3-shared-prod.yaml
+  - ../../base/elastic-stack/apm-server-shared-prod.yaml
+  - ../../base/elastic-stack/ilm-setup-contoso-logs-prod-job.yaml
+  - ../../base/values/values-otel-collector-westus3-shared-prod.yaml
+  - ../../base/otel-collector
+  - ../../base/netshoot/netshoot-deployment.yaml

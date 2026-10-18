@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: icu-encoding-mappings
+  namespace: contoso
+data:
+  appsettings.EncodingMappings.json: |
+    {
+      "EncodingMappings": {
+        "IS": "424.ucm",
+        "XX": "424.ucm",
+        "XD": "424.ucm",
+        "AC": "424.ucm",
+        "XZ": "424.ucm",
+        "GZ": "424.ucm",
+        "GL": "424.ucm",
+        "FU": "424.ucm",
+        "FO": "1144.ucm",
+        "FS": "1144.ucm",
+        "FT": "1144.ucm",
+        "FW": "1147.ucm",
+        "LY": "1026.ucm",
+        "TT": "1026.ucm",
+        "TU": "1026.ucm",
+        "TV": "1026.ucm",
+        "TK": "933.ucm",
+        "UX": "933.ucm",
+        "YV": "933.ucm",
+        "KD": "933.ucm",
+        "KT": "933.ucm",
+        "KC": "935.ucm",
+        "TX": "935.ucm",
+        "LJ": "1399.ucm",
+        "LX": "1399.ucm",
+        "KA": "1399.ucm",
+        "KJ": "1399.ucm",
+        "ME": "1399.ucm",
+        "LT": "1399.ucm",
+        "LN": "1399.ucm"
+      },
+      "DefaultEncoding": "37.ucm"
+    }

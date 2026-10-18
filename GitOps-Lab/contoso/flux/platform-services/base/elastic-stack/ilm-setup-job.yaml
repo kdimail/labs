@@ -1,0 +1,191 @@
+# ILM Policy Setup Job - Creates Index Lifecycle Management policies for 30-day retention
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: elasticsearch-ilm-setup
+  namespace: elastic-stack
+  labels:
+    app: elasticsearch-setup
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  ttlSecondsAfterFinished: 86400  # Clean up after 24 hours
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: elasticsearch-setup
+    spec:
+      restartPolicy: OnFailure
+      
+      initContainers:
+        # Wait for Elasticsearch to be ready
+        - name: wait-for-elasticsearch
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Elasticsearch to be ready..."
+              until curl -k -u "elastic:$(printenv ELASTIC_PASSWORD)" -s "https://production-es-es-http.elastic-stack.svc:9200/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; do
+                echo "Elasticsearch not ready yet, waiting..."
+                sleep 10
+              done
+              echo "Elasticsearch is ready!"
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: production-es-es-elastic-user
+                  key: elastic
+      
+      containers:
+        - name: ilm-setup
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              ES_URL="https://production-es-es-http.elastic-stack.svc:9200"
+              AUTH="elastic:$(printenv ELASTIC_PASSWORD)"
+              
+              echo "=== Setting up ILM Policy for 30-day log retention ==="
+
+              # Create ILM policy for APM indices (30-day retention)
+              echo "Creating apm-30d-policy..."
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_ilm/policy/apm-30d-policy" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "policy": {
+                    "phases": {
+                      "hot": {
+                        "min_age": "0ms",
+                        "actions": {
+                          "rollover": {
+                            "max_primary_shard_size": "10gb",
+                            "max_age": "1d"
+                          },
+                          "set_priority": {
+                            "priority": 100
+                          }
+                        }
+                      },
+                      "warm": {
+                        "min_age": "7d",
+                        "actions": {
+                          "set_priority": {
+                            "priority": 50
+                          },
+                          "forcemerge": {
+                            "max_num_segments": 1
+                          }
+                        }
+                      },
+                      "delete": {
+                        "min_age": "30d",
+                        "actions": {
+                          "delete": {}
+                        }
+                      }
+                    }
+                  }
+                }'
+              
+              echo ""
+              echo "APM ILM policy created successfully!"
+              
+              # Create ILM policy for metrics indices (30-day retention)
+              echo "Creating metrics-30d-policy..."
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_ilm/policy/metrics-30d-policy" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "policy": {
+                    "phases": {
+                      "hot": {
+                        "min_age": "0ms",
+                        "actions": {
+                          "rollover": {
+                            "max_primary_shard_size": "10gb",
+                            "max_age": "1d"
+                          },
+                          "set_priority": {
+                            "priority": 100
+                          }
+                        }
+                      },
+                      "warm": {
+                        "min_age": "3d",
+                        "actions": {
+                          "set_priority": {
+                            "priority": 50
+                          },
+                          "forcemerge": {
+                            "max_num_segments": 1
+                          }
+                        }
+                      },
+                      "delete": {
+                        "min_age": "30d",
+                        "actions": {
+                          "delete": {}
+                        }
+                      }
+                    }
+                  }
+                }'
+              
+              echo ""
+              echo "Metrics ILM policy created successfully!"
+              
+              # Verify policies
+              echo ""
+              echo "=== Verifying ILM Policies ==="
+              curl -k -u "$AUTH" -s "$ES_URL/_ilm/policy" | grep -o '"apm-30d-policy"\|"metrics-30d-policy"'
+              
+              echo ""
+              echo "=== ILM Setup Complete ==="
+              echo "Policies created:"
+              echo "  - apm-30d-policy: 30-day retention for APM data"
+              echo "  - metrics-30d-policy: 30-day retention for metrics"
+
+              echo ""
+              echo "=== Creating Logstash contoso-* index role ==="
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_security/role/logstash_contoso_writer" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "indices": [
+                    {
+                      "names": ["contoso-*"],
+                      "privileges": ["auto_configure", "create_index", "index", "write", "read"]
+                    }
+                  ]
+                }'
+
+              echo ""
+              echo "=== Assigning role to Logstash user ==="
+              LS_USER=$(curl -k -u "$AUTH" -s "$ES_URL/_security/user" | grep -o '"elastic-stack-production-ls[^"]*"' | tr -d '"' | head -1)
+              echo "Logstash user: $LS_USER"
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_security/user/$LS_USER" \
+                -H "Content-Type: application/json" \
+                -d "{\"roles\": [\"eck_logstash_user_role\", \"logstash_contoso_writer\"]}"
+
+              echo ""
+              echo "=== All setup complete ==="
+          
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: production-es-es-elastic-user
+                  key: elastic
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL

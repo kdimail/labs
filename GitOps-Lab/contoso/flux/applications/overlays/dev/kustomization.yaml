@@ -1,0 +1,25 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base/dev/base-chart
+  - ../../base/dev/contoso-purchase-backend
+  - ../../base/dev/contoso-permission-backend
+  - ../../base/dev/contoso-lookuptables-backend
+  - ../../base/dev/contoso-workspace-backend
+  - ../../base/dev/contoso-comment-backend
+  - ../../base/dev/contoso-supplier-backend
+  - ../../base/dev/contoso-sales-backend
+  - ../../base/dev/contoso-logistics-backend
+  - ../../base/dev/contoso-manufacturing-backend
+  - ../../base/dev/contoso-exporttoexcel-worker
+  - ../../base/dev/contoso-workflow-backend
+  - ../../base/dev/contoso-finance-backend
+  - ../../base/dev/contoso-inventory-backend
+  - ../../base/dev/contoso-accessories-backend
+  - ../../base/dev/contoso-pricing-backend
+  - ../../base/dev/contoso-addresses-backend
+  - ../../base/dev/contoso-crm-backend
+  - ../../base/dev/contoso-items-backend
+  - ../../base/dev/contoso-authorization-backend
+  - ../../base/dev/contoso-customer-backend

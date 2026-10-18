@@ -1,0 +1,247 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-ha-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    # Production-grade Redis HA with Sentinel configuration
+    # Using DandyDeveloper redis-ha chart
+    # https://github.com/DandyDeveloper/charts/tree/master/charts/redis-ha
+    
+    # --- Image Configuration ---
+    image:
+      repository: redis
+      tag: 7.2.4-alpine
+      pullPolicy: IfNotPresent
+    
+    # --- Redis HA Configuration ---
+    # Number of Redis replicas (master + replicas)
+    replicas: 3
+    
+    # --- Redis Server Configuration ---
+    redis:
+      # Resource limits and requests for Redis pods
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+      
+      # Redis configuration
+      config:
+        # Memory management
+        maxmemory: "1gb"
+        maxmemory-policy: "allkeys-lru"
+        maxmemory-samples: "5"
+        
+        # Persistence - AOF
+        appendonly: "yes"
+        appendfsync: "everysec"
+        auto-aof-rewrite-percentage: "100"
+        auto-aof-rewrite-min-size: "64mb"
+        
+        # Persistence - RDB
+        save: "900 1 300 10 60 10000"
+        
+        # Replication
+        repl-diskless-sync: "yes"
+        repl-diskless-sync-delay: "5"
+        
+        # Slow log
+        slowlog-log-slower-than: "10000"
+        slowlog-max-len: "128"
+        
+        # Latency
+        latency-monitor-threshold: "100"
+        
+        # Client output buffer limits
+        client-output-buffer-limit-normal: "0 0 0"
+        client-output-buffer-limit-replica: "256mb 64mb 60"
+        client-output-buffer-limit-pubsub: "32mb 8mb 60"
+        
+        # Other settings
+        tcp-backlog: "511"
+        timeout: "0"
+        tcp-keepalive: "300"
+        hz: "10"
+    
+    # --- Sentinel Configuration ---
+    sentinel:
+      # Number of Sentinel replicas
+      replicas: 3
+      
+      # Sentinel quorum (number of Sentinels that need to agree)
+      quorum: 2
+      
+      # Resource limits and requests for Sentinel pods
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      
+      # Sentinel configuration
+      config:
+        down-after-milliseconds: "5000"
+        failover-timeout: "10000"
+        parallel-syncs: "1"
+    
+    # --- HAProxy Configuration ---
+    haproxy:
+      enabled: true
+      replicas: 3
+      
+      # Resource limits and requests for HAProxy pods
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      
+      # HAProxy service
+      service:
+        type: ClusterIP
+        port: 6379
+      
+      # Health check
+      checkInterval: 2s
+      checkFall: 3
+      checkRise: 2
+    
+    # --- Persistence ---
+    persistentVolume:
+      enabled: true
+      size: 10Gi
+      storageClass: ""  # Use default storage class
+      accessModes:
+        - ReadWriteOnce
+    
+    # --- Security Context ---
+    securityContext:
+      runAsUser: 1000
+      fsGroup: 1000
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: false  # Redis needs to write to filesystem
+    
+    # --- Pod Security Context ---
+    podSecurityContext:
+      runAsUser: 1000
+      fsGroup: 1000
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    
+    # --- Pod Anti-Affinity ---
+    # Spread pods across nodes for HA
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: redis-ha
+            topologyKey: kubernetes.io/hostname
+    
+    # --- Pod Disruption Budget ---
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 2
+    
+    # --- Authentication ---
+    # Password will be injected from External Secret
+    auth:
+      enabled: true
+      # redisPassword: "" # Injected from External Secret
+    
+    # --- Service ---
+    service:
+      type: ClusterIP
+      port: 6379
+    
+    # --- Service Account ---
+    serviceAccount:
+      create: true
+      automount: true
+    
+    # --- Init Container ---
+    # System tuning for production
+    sysctlImage:
+      enabled: true
+      command:
+        - /bin/sh
+        - -c
+        - |-
+          sysctl -w net.core.somaxconn=10000
+          echo never > /host-sys/kernel/mm/transparent_hugepage/enabled
+      mountHostSys: true
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+    
+    # --- Monitoring ---
+    exporter:
+      enabled: true
+      image: oliver006/redis_exporter
+      tag: v1.55.0-alpine
+      port: 9121
+      
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      
+      # ServiceMonitor for Prometheus Operator
+      serviceMonitor:
+        enabled: false  # Enable if you have Prometheus Operator
+        # namespace: monitoring
+        # interval: 30s
+        # scrapeTimeout: 10s
+    
+    # --- Health Checks ---
+    livenessProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+    
+    readinessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      successThreshold: 1
+      failureThreshold: 3
+    
+    # --- Node Selector ---
+    nodeSelector: {}
+    
+    # --- Tolerations ---
+    tolerations: []
+    
+    # --- Priority Class ---
+    # priorityClassName: ""
+    
+    # --- Extra Labels ---
+    labels: {}
+    
+    # --- Extra Annotations ---
+    annotations: {}
+

@@ -1,0 +1,122 @@
+# ILM setup for contoso-logs-* (nonprod): hot immediately, delete once the index turns 35 days old.
+# 35d (not a bare 30d) because contoso-logs-* is a monthly index (contoso-logs-YYYY.MM) written
+# by Logstash for up to ~31 days, and ILM min_age is measured from index creation - a shorter
+# window risks deleting the index while it's still being actively written.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: elasticsearch-ilm-setup-contoso-logs-nonprod
+  namespace: elastic-stack
+  labels:
+    app: elasticsearch-setup
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+spec:
+  ttlSecondsAfterFinished: 86400  # Clean up after 24 hours
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: elasticsearch-setup
+    spec:
+      restartPolicy: OnFailure
+
+      initContainers:
+        # Wait for Elasticsearch to be ready
+        - name: wait-for-elasticsearch
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Elasticsearch to be ready..."
+              until curl -k -u "elastic:$(printenv ELASTIC_PASSWORD)" -s "https://production-es-es-http.elastic-stack.svc:9200/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; do
+                echo "Elasticsearch not ready yet, waiting..."
+                sleep 10
+              done
+              echo "Elasticsearch is ready!"
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: production-es-es-elastic-user
+                  key: elastic
+
+      containers:
+        - name: ilm-setup
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              ES_URL="https://production-es-es-http.elastic-stack.svc:9200"
+              AUTH="elastic:$(printenv ELASTIC_PASSWORD)"
+
+              echo "=== Creating contoso-logs-nonprod-policy (hot -> delete at 35d) ==="
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_ilm/policy/contoso-logs-nonprod-policy" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "policy": {
+                    "phases": {
+                      "hot": {
+                        "min_age": "0ms",
+                        "actions": {
+                          "set_priority": {
+                            "priority": 100
+                          }
+                        }
+                      },
+                      "delete": {
+                        "min_age": "35d",
+                        "actions": {
+                          "delete": {}
+                        }
+                      }
+                    }
+                  }
+                }'
+
+              echo ""
+              echo "=== Creating contoso-logs-template (index_patterns: contoso-logs-*) ==="
+              curl -k -u "$AUTH" -X PUT "$ES_URL/_index_template/contoso-logs-template" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "index_patterns": ["contoso-logs-*"],
+                  "template": {
+                    "settings": {
+                      "index.lifecycle.name": "contoso-logs-nonprod-policy",
+                      "index.number_of_replicas": 0
+                    }
+                  },
+                  "priority": 200
+                }'
+
+              echo ""
+              echo "=== Applying policy to any already-existing contoso-logs-* indices ==="
+              curl -k -u "$AUTH" -X PUT "$ES_URL/contoso-logs-*/_settings" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "index.lifecycle.name": "contoso-logs-nonprod-policy",
+                  "index.number_of_replicas": 0
+                }'
+
+              echo ""
+              echo "=== contoso-logs-* nonprod ILM setup complete ==="
+
+          env:
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: production-es-es-elastic-user
+                  key: elastic
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-api-config
+  namespace: contoso
+  labels:
+    app: contoso-inventory-backend
+    service: inventory
+data:
+  CommandTelemetry__ActivitySourceName: Inventory.Commands
+  CommandTelemetry__MeterName: Inventory.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Inventory.Backend
+  Logging__LogLevel__Contoso.Inventory.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Inventory.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: inventoryService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Inventory.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Inventory.Backend.Api: Information
+  Serilog__MinimumLevel__Override__Contoso.Inventory.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Inventory.Backend.Infrastructure: Debug
+  Cache__InventoryDetails__TTL: "300"
+  Cache__InventoryHeaders__TTL: "300"
+  Cache__Suppliers__TTL: "3600"
+  ExportOptions__DefaultDomainName: inventory
+  Export__AllowedDomains__0: inventory
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: "true"
+  Export__EnableExcelExport: "true"
+  Export__EnablePdfExport: "true"
+  Export__MaxExportSize: "50000"
+  FeatureFlags__EnableAdvancedFiltering: "true"
+  FeatureFlags__EnableBulkOperations: "true"
+  FeatureFlags__EnableExport: "true"
+  FeatureFlags__EnablePromiseDateAudit: "true"
+  ServiceBus__QueueName: excel-export-queue
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Api: Debug

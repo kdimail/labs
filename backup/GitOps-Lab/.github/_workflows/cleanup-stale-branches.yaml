@@ -1,0 +1,67 @@
+name: Cleanup Stale GitOps Branches
+run-name: "Cleanup stale deploy/promote/cleanup branches"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Deletes merged/abandoned branches matching deploy/*, promote/*, cleanup/*,
+# onboard/* that have no open pull requests.
+# Runs daily at 05:00 Israel time and can be triggered manually.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+      timezone: "Asia/Jerusalem"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  cleanup-stale-branches:
+    name: Delete stale branches with no open PRs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete stale branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching branches matching deploy/*, promote/*, cleanup/*, onboard/* ..."
+
+          # List all remote branches matching the target prefixes (paginated)
+          BRANCHES=$(gh api "repos/${REPO}/branches" --paginate \
+            --jq '[.[].name | select(test("^(deploy|promote|cleanup|onboard)/"))] | .[]')
+
+          if [ -z "${BRANCHES}" ]; then
+            echo "No matching branches found. Nothing to clean up."
+            exit 0
+          fi
+
+          DELETED=0
+          SKIPPED=0
+
+          while IFS= read -r BRANCH; do
+            # Count open PRs that use this branch as the head
+            OPEN_PRS=$(gh pr list \
+              --repo "${REPO}" \
+              --head "${BRANCH}" \
+              --state open \
+              --json number \
+              --jq 'length')
+
+            if [ "${OPEN_PRS}" -gt 0 ]; then
+              echo "  SKIP   ${BRANCH}  (${OPEN_PRS} open PR)"
+              SKIPPED=$((SKIPPED + 1))
+            else
+              gh api --method DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"
+              echo "  DELETE ${BRANCH}"
+              DELETED=$((DELETED + 1))
+            fi
+          done <<< "${BRANCHES}"
+
+          echo ""
+          echo "Done. Deleted: ${DELETED} | Skipped (open PRs): ${SKIPPED}"

@@ -1,0 +1,13 @@
+---
+# Pod Disruption Budget for PostgreSQL
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sonarqube-postgresql
+  namespace: sonarqube
+spec:
+  minAvailable: 0  # Allow disruption for single-replica database
+  selector:
+    matchLabels:
+      app: postgresql
+      app.kubernetes.io/instance: sonarqube

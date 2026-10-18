@@ -1,0 +1,134 @@
+# Kibana Instance - Prod, Switzerland North region (3 replicas for frontend HA)
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: production-kb
+  namespace: elastic-stack
+spec:
+  version: 8.12.0
+  count: 3
+  
+  # Reference to Elasticsearch cluster
+  elasticsearchRef:
+    name: production-es
+  
+  # HTTP configuration
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: false
+    service:
+      spec:
+        type: ClusterIP
+  
+  # Pod template
+  podTemplate:
+    metadata:
+      labels:
+        app: kibana
+        tier: frontend
+    spec:
+      # Anti-affinity for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    kibana.k8s.elastic.co/name: production-kb
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    kibana.k8s.elastic.co/name: production-kb
+                topologyKey: topology.kubernetes.io/zone
+      
+      # Pod security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
+      containers:
+        - name: kibana
+          env:
+            - name: XPACK_SECURITY_ENCRYPTIONKEY
+              valueFrom:
+                secretKeyRef:
+                  name: kibana-encryption-keys
+                  key: KIBANA_ENCRYPTION_KEY
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              valueFrom:
+                secretKeyRef:
+                  name: kibana-encryption-keys
+                  key: KIBANA_ENCRYPTION_KEY
+            - name: XPACK_REPORTING_ENCRYPTIONKEY
+              valueFrom:
+                secretKeyRef:
+                  name: kibana-encryption-keys
+                  key: KIBANA_ENCRYPTION_KEY
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+          
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 100m
+            limits:
+              memory: 2Gi
+              cpu: 1000m
+          
+          # Liveness and readiness probes
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+              scheme: HTTPS
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+              scheme: HTTPS
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      
+      terminationGracePeriodSeconds: 30
+  
+  # Kibana configuration
+  config:
+    server.publicBaseUrl: "https://kibana-contoso-swn-shared-prod.${domain_filter}"
+    server.name: "kibana-production"
+    
+    # X-Pack features (many are enabled by default in 8.x)
+    xpack.reporting.enabled: true
+    
+    # Security encryption keys are set via environment variables:
+    # XPACK_SECURITY_ENCRYPTIONKEY
+    # XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY  
+    # XPACK_REPORTING_ENCRYPTIONKEY
+    
+    # Monitoring
+    monitoring.ui.enabled: true
+    
+    # Session configuration
+    xpack.security.session.idleTimeout: "1h"
+    xpack.security.session.lifespan: "8h"
+    
+    # Logging (Kibana 8.x format)
+    logging.root.level: info

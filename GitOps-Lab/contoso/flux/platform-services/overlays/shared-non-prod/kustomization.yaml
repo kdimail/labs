@@ -1,0 +1,32 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base/reloader
+  - ../../base/secret-stores
+  - ../../base/tls-wild-cluster-external-secret.yaml
+  - ../../base/values/values-fluent-bit-contoso-shared-il.yaml
+  - ../../base/fluent-bit
+  - ../../base/values/values-monitoring-contoso-shared-il.yaml
+  - ../../base/monitoring/externalsecret.yaml
+  - ../../base/monitoring
+  - ../../base/databases/mongodb
+  - ../../base/ingresses/ingress-mongodb-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-mongodb-express-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-kibana-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-logstash-logs-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-logstash-performance-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-logstash-apitest-shared-non-prod.yaml
+  - ../../base/ingresses/ingress-otel-shared-non-prod.yaml
+  - ../../base/elastic-stack
+  - ../../base/elastic-stack/elasticsearch-shared-non-prod.yaml
+  - ../../base/elastic-stack/logstash-shared-non-prod.yaml
+  - ../../base/elastic-stack/kibana-shared-non-prod.yaml
+  - ../../base/elastic-stack/apm-server-shared-non-prod.yaml
+  - ../../base/elastic-stack/ilm-setup-contoso-logs-nonprod-job.yaml
+  - ../../base/values/values-otel-collector-shared-non-prod.yaml
+  - ../../base/otel-collector
+  - ../../base/netshoot/netshoot-deployment.yaml
+  - ../../base/databases/restheart
+  

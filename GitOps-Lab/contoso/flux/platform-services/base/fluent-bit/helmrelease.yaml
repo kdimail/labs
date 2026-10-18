@@ -1,0 +1,35 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: fluent-bit
+  namespace: flux-system
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: fluent-bit
+      version: '0.47.10'
+      sourceRef:
+        kind: HelmRepository
+        name: fluent
+        namespace: flux-system
+      interval: 87600h
+  
+  targetNamespace: logging
+  
+  install:
+    crds: Create
+    remediation:
+      retries: 3
+  
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+
+  # Values are provided by an environment-specific ConfigMap created before this HelmRelease.
+  # The ConfigMap is referenced in each overlay's kustomization.yaml (values-fluent-bit-contoso-<env>.yaml).
+  valuesFrom:
+    - kind: ConfigMap
+      name: fluent-bit-values
+      valuesKey: values.yaml

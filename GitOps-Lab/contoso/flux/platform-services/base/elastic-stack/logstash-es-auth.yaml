@@ -1,0 +1,25 @@
+# ECK custom roles secret - defines the logstash_contoso_writer role
+# Referenced in elasticsearch.yaml spec.auth.roles
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logstash-contoso-roles
+  namespace: elastic-stack
+stringData:
+  roles.yml: |
+    logstash_contoso_writer:
+      cluster: []
+      indices:
+        - names: ["contoso-*"]
+          privileges: ["auto_configure", "create_index", "index", "write", "read"]
+---
+# ECK file realm extension - assigns logstash_contoso_writer role to the ECK logstash user
+# Referenced in elasticsearch.yaml spec.auth.fileRealm
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logstash-contoso-filerealm
+  namespace: elastic-stack
+stringData:
+  users_roles: |
+    logstash_contoso_writer:elastic-stack-production-ls-elastic-stack-production-es-logstash-user

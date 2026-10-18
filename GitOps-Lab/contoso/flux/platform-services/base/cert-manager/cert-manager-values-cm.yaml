@@ -1,0 +1,102 @@
+---
+# ConfigMap containing cert-manager Helm values
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-manager-values
+  namespace: cert-manager
+data:
+  values.yaml: |
+    # Install CRDs
+    crds:
+      enabled: true
+      keep: true
+
+    replicaCount: 2
+
+    # Leader election
+    global:
+      leaderElection:
+        namespace: cert-manager
+      # RBAC configuration
+      rbac:
+        create: true
+
+    # ServiceAccount configuration for cert-manager controller
+    serviceAccount:
+      create: true
+      name: cert-manager
+      annotations: {}
+      # Optional: Add Workload Identity annotation for Azure
+      # annotations:
+      #   azure.workload.identity/use: "true"
+      #   azure.workload.identity/client-id: "<your-client-id>"
+      automountServiceAccountToken: true
+
+    # Resources
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+    # Security context
+    securityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+
+    # Webhook configuration
+    webhook:
+      replicaCount: 2
+      # ServiceAccount for webhook
+      serviceAccount:
+        create: true
+        name: cert-manager-webhook
+        annotations: {}
+        automountServiceAccountToken: true
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+    # CA Injector configuration
+    cainjector:
+      replicaCount: 2
+      # ServiceAccount for cainjector
+      serviceAccount:
+        create: true
+        name: cert-manager-cainjector
+        annotations: {}
+        automountServiceAccountToken: true
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi
+
+    # Prometheus metrics
+    prometheus:
+      enabled: true
+      servicemonitor:
+        enabled: false
+
+    # Pod Disruption Budget
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+

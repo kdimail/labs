@@ -1,0 +1,15 @@
+---
+# Pod Disruption Budget for Logstash
+# Ensures high availability during voluntary disruptions (node drains, updates, etc.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: production-ls-pdb
+  namespace: elastic-stack
+  labels:
+    app: logstash
+spec:
+  maxUnavailable: 1  # non-prod runs 1 replica; minAvailable would block node drains
+  selector:
+    matchLabels:
+      logstash.k8s.elastic.co/name: production-ls

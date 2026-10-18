@@ -1,0 +1,7 @@
+# Contoso Namespace 
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: contoso
+  labels:
+    name: contoso

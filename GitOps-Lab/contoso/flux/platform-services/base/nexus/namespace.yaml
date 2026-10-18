@@ -1,0 +1,8 @@
+# Production-grade Nexus Repository (single-instance, AKS).
+# - Pinned image tag (no :latest); admin password from Azure KV via External Secrets.
+# - StatefulSet with volumeClaimTemplates; headless Service; PDB; hardened SecurityContext.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus

@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finance-api-config
+  namespace: contoso
+  labels:
+    app: contoso-finance-backend
+    service: finance
+data:
+  CommandTelemetry__ActivitySourceName: Supplier.Commands
+  CommandTelemetry__MeterName: Supplier.Commands
+  CommandTelemetry__MeterVersion: "1.0.0"
+  ElasticApm__ServiceName: Contoso.Finance.Backend
+  Logging__LogLevel__Contoso.Finance.Backend: Debug
+  OpenTelemetry__ServiceName: Contoso.Supplier.Backend.Api
+  Pagination__DefaultPageSize: "50"
+  Pagination__MaxPageSize: "1000"
+  Performance__CommandTimeout: "30"
+  Performance__MaxRetryCount: "3"
+  Performance__QueryTimeout: "180"
+  Serilog__InfluxDb__ApplicationName: supplierService
+  Serilog__InfluxDb__InstanceName: production
+  ServiceName: Contoso.Supplier.Backend.Api
+  Serilog__MinimumLevel__Override__Contoso.Finance.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.Finance.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.Finance.Backend.Infrastructure: Debug
+  Cache__financeDetails__TTL: "300"
+  Cache__financeHeaders__TTL: "300"
+  Cache__Suppliers__TTL: "3600"
+  ExportOptions__DefaultDomainName: supplier
+  Export__AllowedDomains__0: supplier
+  Export__AllowedDomains__1: api
+  Export__EnableCsvExport: "true"
+  Export__EnableExcelExport: "true"
+  Export__EnablePdfExport: "true"
+  Export__MaxExportSize: "50000"
+  FeatureFlags__EnableAdvancedFiltering: "true"
+  FeatureFlags__EnableBulkOperations: "true"
+  FeatureFlags__EnableExport: "true"
+  FeatureFlags__EnablePromiseDateAudit: "true"
+  Logging__LogLevel__Contoso.finance.Backend: Debug
+  ServiceBus__QueueName: excel-export-queue
+  Serilog__MinimumLevel__Override__Contoso.Workspace.Backend.Api: Debug
+  Serilog__MinimumLevel__Override__Contoso.finance.Backend.Application: Debug
+  Serilog__MinimumLevel__Override__Contoso.finance.Backend.Infrastructure: Debug
+  Cache__PurchaseDetails__TTL: "300"
+  Cache__PurchaseHeaders__TTL: "300"
+  Logging__LogLevel__Contoso.Supplier.Backend: Debug
+  LookupCache__EnableDbFallback: "true"
+  LookupCache__NormalizeUppercase: "true"
+  LookupCache__Ttl: 2.00:00:00

@@ -1,0 +1,85 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus-operator
+  namespace: flux-system
+spec:
+  interval: 5m
+  targetNamespace: monitoring
+
+  install:
+    createNamespace: false
+    crds: Create
+    timeout: 10m
+    remediation:
+      retries: 3
+
+  upgrade:
+    crds: CreateReplace
+    timeout: 10m
+    cleanupOnFail: true
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: ">=78.0.1"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-grafana
+        namespace: flux-system
+      interval: 12h
+
+  values:
+    defaultRules:
+      create: false
+
+    alertmanager:
+      enabled: false
+
+    grafana:
+      enabled: false
+
+    prometheus:
+      enabled: false
+
+    kubeApiServer:
+      enabled: false
+
+    kubeControllerManager:
+      enabled: false
+
+    kubeEtcd:
+      enabled: false
+
+    kubeScheduler:
+      enabled: false
+
+    kubeProxy:
+      enabled: false
+
+    kubelet:
+      enabled: false
+
+    kubeStateMetrics:
+      enabled: false
+
+    prometheus-node-exporter:
+      enabled: false
+
+    coreDns:
+      enabled: false
+
+    prometheusOperator:
+      enabled: true
+      tls:
+        enabled: false
+      admissionWebhooks:
+        enabled: false
+        patch:
+          enabled: false
+        deployment:
+          enabled: false

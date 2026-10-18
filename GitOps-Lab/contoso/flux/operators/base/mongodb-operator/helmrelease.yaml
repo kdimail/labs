@@ -1,0 +1,32 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: mongodb-operator
+  namespace: flux-system
+spec:
+  interval: 1m
+  targetNamespace: mongodb
+  install:
+    createNamespace: true
+    crds: Create
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: community-operator
+      version: ">=0.9.0"
+      sourceRef:
+        kind: HelmRepository
+        name: mongodb
+        namespace: flux-system
+      interval: 12h
+  valuesFrom:
+    - kind: ConfigMap
+      name: mongodb-values
+      valuesKey: values.yaml
+

@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: logstash-logs-ingress
+  namespace: elastic-stack
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "300"
+    nginx.ingress.kubernetes.io/upstream-keepalive-connections: "100"
+    nginx.ingress.kubernetes.io/upstream-keepalive-timeout: "60"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "POST, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type"
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  tls:
+    - hosts:
+        - logstash-logs-contoso-shared-non-prod.${domain_filter}
+      secretName: ssl-contoso-grp-com-tls
+  rules:
+    - host: logstash-logs-contoso-shared-non-prod.${domain_filter}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: production-ls-ls-logs
+                port:
+                  number: 5046

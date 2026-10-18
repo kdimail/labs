@@ -1,0 +1,14 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# DO NOT set a global namespace - it causes cross-namespace reference issues
+# - HelmRepository and HelmRelease must be in flux-system
+# - Other resources (namespace, values) are in elastic-system
+# Each resource file explicitly declares its namespace
+
+resources:
+  - namespace.yaml
+  - helmrepository.yaml
+  - helmrelease.yaml
+  - values.yaml

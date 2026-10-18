@@ -1,0 +1,47 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: eck-operator
+  namespace: flux-system
+spec:
+  interval: 30m
+  timeout: 15m
+  chart:
+    spec:
+      chart: eck-operator
+      version: "2.13.0"  # Latest stable version as of Jan 2026
+      sourceRef:
+        kind: HelmRepository
+        name: elastic
+        namespace: flux-system
+      interval: 12h
+  
+  # Install into elastic-system namespace
+  targetNamespace: elastic-system
+  
+  install:
+    crds: CreateReplace
+    createNamespace: false  # Already created by namespace.yaml
+    remediation:
+      retries: 3
+  
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+    cleanupOnFail: true
+  
+  # Reference to ConfigMap containing values
+  valuesFrom:
+    - kind: ConfigMap
+      name: eck-operator-values
+      valuesKey: values.yaml
+  
+  # Health checks
+  test:
+    enable: false
+  
+  # Monitor deployment
+  postRenderers: []

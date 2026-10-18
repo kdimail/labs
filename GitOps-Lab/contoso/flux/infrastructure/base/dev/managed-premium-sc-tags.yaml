@@ -1,0 +1,16 @@
+allowVolumeExpansion: true
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  labels:
+    addonmanager.kubernetes.io/mode: EnsureExists
+    kubernetes.io/cluster-service: "true"
+  name: managed-premium-sc-tags
+parameters:
+  cachingmode: ReadOnly
+  kind: Managed
+  storageaccounttype: Premium_ZRS
+  tags: Terraform=False, CreatedBy=IT, Environment=Dev, Team=IT, Region=Lab,Company=LabCo, Department=IT, Category=Disks, SubCategory=Managed Disk
+provisioner: disk.csi.azure.com
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

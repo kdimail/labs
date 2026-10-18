@@ -1,0 +1,197 @@
+# Logstash Instance - Prod (3 replicas, shared by both switzerlandnorth-shared-prod and
+# westus3-shared-prod - each region runs its own physically separate deployment from this spec)
+apiVersion: logstash.k8s.elastic.co/v1alpha1
+kind: Logstash
+metadata:
+  name: production-ls
+  namespace: elastic-stack
+spec:
+  version: 8.12.0
+  count: 3
+  
+  # ECK-native Elasticsearch reference - automatically injects credentials
+  # This creates env vars: PRODUCTION_ES_HOSTS, PRODUCTION_ES_CA_PATH, etc.
+  elasticsearchRefs:
+    - name: production-es
+      clusterName: production
+  
+  # Logstash configuration
+  config:
+    log.level: info
+    api.http.host: "0.0.0.0"
+    api.http.port: 9600
+    queue.type: persisted
+    queue.max_bytes: 1gb
+    path.queue: "/usr/share/logstash/data/queue"
+  
+  # Pipeline configuration - uses ConfigMap so ECK env vars are substituted at runtime by Logstash
+  pipelines:
+    - pipeline.id: logging-pipeline
+      path.config: "/usr/share/logstash/pipeline/logging-pipeline.conf"
+      # Raised from defaults (workers=1 given old 500m cpu limit) to absorb the
+      # fluent-bit DaemonSet fan-in without the http input returning 429
+      pipeline.workers: 2
+      pipeline.batch.size: 250
+
+    - pipeline.id: api-performance-pipeline
+      path.config: "/usr/share/logstash/pipeline/api-performance-pipeline.conf"
+
+    - pipeline.id: api-test-pipeline
+      path.config: "/usr/share/logstash/pipeline/api-test-pipeline.conf"
+
+  # Services for input plugins
+  services:
+    - name: beats
+      service:
+        spec:
+          type: ClusterIP
+          ports:
+            - name: beats
+              port: 5044
+              protocol: TCP
+              targetPort: 5044
+    - name: http
+      service:
+        spec:
+          type: ClusterIP
+          ports:
+            - name: http
+              port: 8080
+              protocol: TCP
+              targetPort: 8080
+    - name: logs
+      service:
+        spec:
+          type: ClusterIP
+          ports:
+            - name: logs
+              port: 5046
+              protocol: TCP
+              targetPort: 5046
+    - name: perf
+      service:
+        spec:
+          type: ClusterIP
+          ports:
+            - name: perf
+              port: 5047
+              protocol: TCP
+              targetPort: 5047
+    - name: apitest
+      service:
+        spec:
+          type: ClusterIP
+          ports:
+            - name: apitest
+              port: 5045
+              protocol: TCP
+              targetPort: 5045
+  
+  # Pod template
+  podTemplate:
+    metadata:
+      labels:
+        app: logstash
+        tier: processing
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    logstash.k8s.elastic.co/name: production-ls
+                topologyKey: kubernetes.io/hostname
+      
+      # Pod security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
+      containers:
+        - name: logstash
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+          
+          env:
+            - name: LS_JAVA_OPTS
+              value: "-Xms1500m -Xmx1500m"
+          
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: 1500m
+          
+          volumeMounts:
+            - name: logstash-data
+              mountPath: /usr/share/logstash/data
+            - name: pipeline-logging
+              mountPath: /usr/share/logstash/pipeline/logging-pipeline.conf
+              subPath: logging-pipeline.conf
+              readOnly: true
+            - name: pipeline-performance
+              mountPath: /usr/share/logstash/pipeline/api-performance-pipeline.conf
+              subPath: api-performance-pipeline.conf
+              readOnly: true
+            - name: pipeline-apitest
+              mountPath: /usr/share/logstash/pipeline/api-test-pipeline.conf
+              subPath: api-test-pipeline.conf
+              readOnly: true
+          
+          # Liveness probe - ECK enables TLS on API by default
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9600
+              scheme: HTTPS
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          
+          # Readiness probe - ECK enables TLS on API by default
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9600
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+      
+      terminationGracePeriodSeconds: 30
+
+      volumes:
+        - name: pipeline-logging
+          configMap:
+            name: logstash-pipeline-logging
+        - name: pipeline-performance
+          configMap:
+            name: logstash-pipeline-performance
+        - name: pipeline-apitest
+          configMap:
+            name: logstash-pipeline-apitest
+  
+  # Persistent storage for queue durability
+  volumeClaimTemplates:
+    - metadata:
+        name: logstash-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: managed-premium-sc-tags

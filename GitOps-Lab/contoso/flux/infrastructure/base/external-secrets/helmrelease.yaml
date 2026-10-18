@@ -1,0 +1,44 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-secrets
+  namespace: flux-system
+spec:
+  interval: 1m
+  # Deploy application resources to the external-secrets namespace
+  # (HelmRelease is in flux-system, but app deploys to external-secrets)
+  targetNamespace: external-secrets
+  
+  # Ensure the target namespace is created if it is missing.
+  # This is the correct way to handle namespace creation on initial install.
+  install:
+    createNamespace: true
+    crds: Create
+  
+  # Removed 'createNamespace: true' from the 'upgrade' section 
+  # to fix the schema validation error reported by the kustomize-controller.
+  upgrade:
+    # Minimal upgrade configuration, relies on 'install' for namespace creation.
+    # The error was '.spec.upgrade.createNamespace: field not declared in schema'
+    # By removing it, we comply with the CRD schema.
+    crds: CreateReplace
+    remediation:
+      remediateLastFailure: true
+
+  chart:
+    spec:
+      chart: external-secrets
+      # STRICT SEMVER: Do not include 'v' prefix for chart versions
+      version: "1.1.1"
+      sourceRef:
+        kind: HelmRepository
+        name: external-secrets
+        namespace: flux-system
+      interval: 10m
+
+  # Loads values from a ConfigMap in the external-secrets namespace
+  valuesFrom:
+    - kind: ConfigMap
+      name: external-secrets-values
+      valuesKey: values.yaml

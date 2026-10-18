@@ -1,0 +1,21 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: elastic-stack
+
+resources:
+  - namespace.yaml
+  - logstash-es-auth.yaml
+  - logstash-pipeline-logging-cm.yaml
+  - logstash-pipeline-performance-cm.yaml
+  - logstash-pipeline-apitest-cm.yaml
+  - serviceaccount.yaml
+  - pdb-apm.yaml
+  - pdb-kibana.yaml
+  - pdb-logstash.yaml
+  - externalsecret.yaml
+  - network-policy.yaml
+  - ilm-setup-job.yaml
+  - kibana-index-pattern-job.yaml
+  - apm-fleet-integration-job.yaml

@@ -1,0 +1,206 @@
+---
+# Base Helm values for RESTHeart.
+# Sensitive values (mongo-uri, admin user document) are injected from
+# the restheart-secrets ExternalSecret via HelmRelease valuesFrom.
+# ${domain_filter} is substituted by Flux postBuild from cluster-secret-config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: restheart-values
+  namespace: flux-system
+data:
+  values.yaml: |
+    replicaCount: 1
+
+    image:
+      repository: softinstigate/restheart
+      pullPolicy: IfNotPresent
+      tag: "9.7.2"  # keep in sync with the GitRepository ref tag in restheart-helmrelease.yaml
+
+    service:
+      type: ClusterIP
+      port: 80
+
+    ingress:
+      enabled: true
+      className: webapprouting.kubernetes.azure.com
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+      hosts:
+        - host: "restheart-contoso-non-prod.${domain_filter}"
+          paths:
+            - path: /
+              pathType: Prefix
+      tls:
+        - hosts:
+            - "restheart-contoso-non-prod.${domain_filter}"
+          secretName: ssl-contoso-grp-com-tls
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+    # Chart default securityContext.readOnlyRootFilesystem=true has no writable /tmp, which broke
+    # GridFS uploads (Undertow buffers multipart file uploads to /tmp - InterceptorException:
+    # FileMediaTypeDetector caused by FileSystemException: Read-only file system).
+    extraVolumes:
+      - name: tmp
+        emptyDir: {}
+    extraVolumeMounts:
+      - name: tmp
+        mountPath: /tmp
+
+    podAntiAffinity: soft
+
+    podDisruptionBudget:
+      enabled: false
+      minAvailable: 1
+
+    # RESTHeart configuration (restheart.yml).
+    # mongo-uri and create-user-document are overridden by the restheart-secrets Secret.
+    restHeartConfiguration:
+      # HTTP listener (HTTPS terminated at ingress)
+      http-listener:
+        enabled: true
+        host: 0.0.0.0
+        port: 8080
+      https-listener:
+        enabled: false
+        host: localhost
+        port: 4443
+      ajp-listener:
+        enabled: false
+        host: localhost
+        port: 8009
+
+      instance-name: restheart
+      # Public base URL used for Location headers; matches the ingress hostname.
+      instance-base-url: "https://restheart-contoso-non-prod.${domain_filter}"
+
+      # MongoDB connection string - overridden by Secret via valuesFrom
+      mclient:
+        connection-string: ""
+
+      # Expose all MongoDB resources under /
+      mongo-mounts:
+        - what: /restheart
+          where: /
+
+      default-representation-format: STANDARD
+
+      # Metrics service config (RESTHeart 9: plugin name is the top-level key)
+      metrics:
+        uri: /metrics
+
+      # Authentication mechanisms (RESTHeart 9: plugin name is the top-level key)
+      tokenBasicAuthMechanism:
+        enabled: true
+      basicAuthMechanism:
+        enabled: true
+        authenticator: mongoRealmAuthenticator
+      jwtAuthenticationMechanism:
+        enabled: false
+      digestAuthMechanism:
+        enabled: false
+
+      # Authenticators (RESTHeart 9: plugin name is the top-level key)
+      mongoRealmAuthenticator:
+        enabled: true
+        users-db: restheart
+        users-collection: users
+        prop-id: _id
+        prop-password: password
+        json-path-roles: $.roles
+        bcrypt-hashed-password: true
+        bcrypt-complexity: 12
+        create-user: true
+        # Overridden by Secret via valuesFrom with bcrypt-hashed admin credentials
+        create-user-document: ""
+        cache-enabled: false
+        cache-size: 1000
+        cache-ttl: 60000
+        cache-expire-policy: AFTER_WRITE
+
+      # Authorizers (RESTHeart 9: plugin name is the top-level key)
+      mongoAclAuthorizer:
+        enabled: true
+        acl-db: restheart
+        acl-collection: acl
+        root-role: admin
+        cache-enabled: true
+        cache-size: 1000
+        cache-ttl: 5000
+        cache-expire-policy: AFTER_WRITE
+      originVetoer:
+        enabled: false
+
+      # Token manager (RESTHeart 9: plugin name is the top-level key)
+      rndTokenManager:
+        enabled: true
+        ttl: 15
+        srv-uri: /tokens
+
+      # Logging
+      enable-log-file: false
+      enable-log-console: true
+      log-level: INFO
+      requests-log-level: 1
+      # Disable ANSI in containers (no TTY)
+      ansi-console: false
+      metrics-gathering-level: DATABASE
+
+      # Caches
+      local-cache-enabled: true
+      local-cache-ttl: 60000
+      schema-cache-enabled: true
+      schema-cache-ttl: 60000
+
+      # Paging defaults
+      default-pagesize: 100
+      max-pagesize: 1000
+      force-gzip-encoding: false
+
+      # Security defaults
+      aggregation-check-operators: true
+      allow-unescaped-characters-in-url: true
+
+      etag-check-policy:
+        db: REQUIRED_FOR_DELETE
+        coll: REQUIRED_FOR_DELETE
+        doc: OPTIONAL
+
+      # Brute force protection
+      bruteForceAttackGuard:
+        enabled: true
+        max-failed-attempts: 5
+        trust-x-forwarded-for: true
+        x-forwarded-for-value-from-last: 0
+
+      # Plugin directory (default)
+      plugins-directory: plugins
+
+      # Built-in services
+      mongo:
+        uri: /
+      ping:
+        enabled: true
+        msg: "Greetings from RESTHeart!"
+      authTokenService:
+        uri: /tokens
+      roles:
+        uri: /roles
+      graphql:
+        uri: /graphql
+        db: restheart
+        collection: gql-apps
+        default-limit: 100
+        max-limit: 1000
+        verbose: false
+      filterOperatorsBlacklist:
+        blacklist: ["$where"]
+        enabled: true

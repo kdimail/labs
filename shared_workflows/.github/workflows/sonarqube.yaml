@@ -1,0 +1,158 @@
+name: SonarQube scan - .NET (v3)
+run-name: "SonarQube: ${{ github.repository }} @ ${{ github.sha }}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# SonarScanner for .NET (begin → build → end). The generic sonar-scanner-cli
+# does not analyse C# without an MSBuild step, hence dotnet-sonarscanner.
+# Requires Java 17+. The job succeeds once the analysis is submitted; the
+# SonarQube quality gate result is not evaluated (results are read on the
+# SonarQube dashboard).
+#
+# enforce=true (default): any failure (build, scan, missing config) fails the job. enforce=false: the job stays green and a warning says what
+# would have blocked (report-only rollout / break-glass).
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      projectKey:
+        description: "SonarQube project key. Defaults to the repository name."
+        required: false
+        type: string
+        default: ""
+      solutionFile:
+        description: "Solution/project to build (e.g. Orders.sln). Empty = dotnet build in the repo root."
+        required: false
+        type: string
+        default: ""
+      dotNetVersion:
+        description: ".NET major version (e.g. 8)"
+        required: false
+        type: string
+        default: "8"
+      scannerVersion:
+        description: "dotnet-sonarscanner version (empty = latest)"
+        required: false
+        type: string
+        default: ""
+      enforce:
+        description: "true = failures block; false = report-only (job stays green, warning is emitted)"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      SONAR_URL:
+        description: "URL of the SonarQube server"
+        required: false
+      SONAR_TOKEN:
+        description: "Token allowed to execute analyses"
+        required: false
+      NUGET_CONFIG_CONTENT:
+        description: "Base64-encoded NuGet.config for private feeds. Optional; if omitted, a clean nuget.org-only config is used."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sonarqube:
+    runs-on: ["self-hosted", "Region:il"]
+    continue-on-error: ${{ !inputs.enforce }}
+
+    env:
+      SONAR_PROJECT_KEY: ${{ inputs.projectKey != '' && inputs.projectKey || github.event.repository.name }}
+      SONAR_URL: ${{ secrets.SONAR_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SOLUTION: ${{ inputs.solutionFile }}
+      NUGET_B64: ${{ secrets.NUGET_CONFIG_CONTENT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate SonarQube configuration
+        run: |
+          MISSING=""
+          [ -n "${SONAR_URL}" ]   || MISSING="${MISSING} SONAR_URL"
+          [ -n "${SONAR_TOKEN}" ] || MISSING="${MISSING} SONAR_TOKEN"
+          if [ -n "${MISSING}" ]; then
+            echo "::error::SonarQube scan not configured: missing secret(s):${MISSING}. The caller must pass them to this workflow."
+            exit 1
+          fi
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotNetVersion }}.0.x
+
+      - name: Setup NuGet config
+        run: |
+          NUGET_CFG="${RUNNER_TEMP}/nuget.config"
+          if [ -n "${NUGET_B64}" ]; then
+            echo "${NUGET_B64}" | base64 -d > "${NUGET_CFG}"
+            echo "NuGet config written from secret."
+          else
+            # <clear /> blocks the persistent global sources on the self-hosted runner.
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="utf-8"?>' \
+              '<configuration>' \
+              '  <packageSources>' \
+              '    <clear />' \
+              '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />' \
+              '  </packageSources>' \
+              '</configuration>' > "${NUGET_CFG}"
+            echo "No NUGET_CONFIG_CONTENT - wrote clean config with nuget.org only."
+          fi
+          echo "NUGET_CFG=${NUGET_CFG}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Validate SonarQube connectivity
+        run: |
+          case "${SONAR_URL}" in
+            http://*|https://*) ;;
+            *) echo "::error::SONAR_URL secret must start with http:// or https://"; exit 1 ;;
+          esac
+          SONAR_HOST=$(echo "${SONAR_URL}" | sed -E 's#^https?://([^/:]+).*$#\1#')
+          echo "Testing DNS resolution for ${SONAR_HOST}"
+          getent hosts "${SONAR_HOST}" || true
+          nslookup "${SONAR_HOST}" || true
+          curl --silent --show-error --fail --max-time 20 "${SONAR_URL}/api/system/status"
+
+      - name: Install dotnet-sonarscanner
+        env:
+          SCANNER_VERSION: ${{ inputs.scannerVersion }}
+        run: |
+          set -euo pipefail
+          TOOL_DIR="${RUNNER_TEMP}/sonarscanner"
+          if [ -n "${SCANNER_VERSION}" ]; then
+            dotnet tool update dotnet-sonarscanner --tool-path "${TOOL_DIR}" --configfile "${NUGET_CFG}" --version "${SCANNER_VERSION}"
+          else
+            dotnet tool update dotnet-sonarscanner --tool-path "${TOOL_DIR}" --configfile "${NUGET_CFG}"
+          fi
+          echo "${TOOL_DIR}" >> "$GITHUB_PATH"
+
+      - name: SonarScanner begin
+        run: |
+          dotnet-sonarscanner begin \
+            /k:"${SONAR_PROJECT_KEY}" \
+            /d:sonar.host.url="${SONAR_URL}" \
+            /d:sonar.token="${SONAR_TOKEN}" \
+            /d:sonar.exclusions="**/bin/**,**/obj/**,.dotnet/**"
+
+      - name: Restore
+        run: dotnet restore ${SOLUTION:+"$SOLUTION"} --configfile "${NUGET_CFG}"
+
+      - name: Build
+        run: dotnet build ${SOLUTION:+"$SOLUTION"} --configuration Release --no-restore
+
+      - name: SonarScanner end
+        run: dotnet-sonarscanner end /d:sonar.token="${SONAR_TOKEN}"
+
+      - name: Report-only notice
+        if: ${{ failure() && !inputs.enforce }}
+        run: echo "::warning::SonarQube scan failed but enforce=false (report-only), so the build is not blocked. See the failed step above."

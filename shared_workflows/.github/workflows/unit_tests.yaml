@@ -1,0 +1,96 @@
+name: CI - unit tests (v3)
+run-name: "CI - unit tests"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Restores, builds and runs the tests of a .NET solution. Used by Build and
+# Deploy (first stage) and by each repo's own PR / feature-branch
+# check.
+#
+# enforce=true (default): a failure fails the job. enforce=false: report-only,
+# the job stays green and a warning says what would have blocked.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      solutionFile:
+        description: "Solution/project to build and test (e.g. Orders.sln). Empty = dotnet in the repo root."
+        required: false
+        type: string
+        default: ""
+      dotNetVersion:
+        description: ".NET major version (e.g. 8)"
+        required: false
+        type: string
+        default: "8"
+      enforce:
+        description: "true = failures block; false = report-only (job stays green, warning is emitted)"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      NUGET_CONFIG_CONTENT:
+        description: "Base64-encoded NuGet.config for private feeds. Optional; if omitted, a clean nuget.org-only config is used."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ["self-hosted", "Region:il"]
+    continue-on-error: ${{ !inputs.enforce }}
+
+    env:
+      SOLUTION: ${{ inputs.solutionFile }}
+      NUGET_B64: ${{ secrets.NUGET_CONFIG_CONTENT }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotNetVersion }}.0.x
+
+      - name: Setup NuGet config
+        run: |
+          NUGET_CFG="${RUNNER_TEMP}/nuget.config"
+          if [ -n "${NUGET_B64}" ]; then
+            echo "${NUGET_B64}" | base64 -d > "${NUGET_CFG}"
+            echo "NuGet config written from secret."
+          else
+            # <clear /> blocks the persistent global sources on the self-hosted runner.
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="utf-8"?>' \
+              '<configuration>' \
+              '  <packageSources>' \
+              '    <clear />' \
+              '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />' \
+              '  </packageSources>' \
+              '</configuration>' > "${NUGET_CFG}"
+            echo "No NUGET_CONFIG_CONTENT - wrote clean config with nuget.org only."
+          fi
+          echo "NUGET_CFG=${NUGET_CFG}" >> "$GITHUB_ENV"
+
+      - name: Restore
+        run: dotnet restore ${SOLUTION:+"$SOLUTION"} --configfile "${NUGET_CFG}"
+
+      - name: Build
+        run: dotnet build ${SOLUTION:+"$SOLUTION"} --configuration Release --no-restore
+
+      - name: Test
+        run: |
+          dotnet test ${SOLUTION:+"$SOLUTION"} --configuration Release --no-build \
+            --logger trx --results-directory "${RUNNER_TEMP}/test-results"
+
+      - name: Upload test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/test-results/*.trx
+          if-no-files-found: ignore
+
+      - name: Report-only notice
+        if: ${{ failure() && !inputs.enforce }}
+        run: echo "::warning::Unit tests failed but enforce=false (report-only), so the build is not blocked. See the failed step above."

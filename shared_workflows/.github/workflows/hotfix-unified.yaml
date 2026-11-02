@@ -1,0 +1,899 @@
+name: Hotfix Unified Pipeline (v3)
+run-name: "Hotfix [${{ inputs.baseBranch }}←${{ inputs.headBranch }}] (${{ inputs.eventAction }})"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Single reusable workflow covering the complete hotfix lifecycle:
+#
+#   Stage 1 — build       : PR opened/updated against hotfixDevBranch
+#                           Calls build-and-deploy with hotfixBranchRef set
+#                           → builds image + pushes hotfix-{name} tag
+#                           → skips GitOps dev update (handled by deploy-dev)
+#
+#   Stage 2 — deploy-dev  : PR merged into hotfixDevBranch
+#                           Creates parallel hotfix folder in GitOps base/dev
+#                           → opens GitOps PR (auto-merged by autopromote)
+#
+#   Stage 3 — promote-qa  : PR merged into hotfixQaBranch
+#                           Moves hotfix folder from DEV → QA in a single PR
+#                           → DEV hotfix folder and overlay entry are removed
+#
+#   Stage 4 — to-prod     : PR merged into main/master FROM hotfixQaBranch
+#                           Patches all *-prod HelmReleases, removes QA folder
+#                           → PR requires human review (no auto-merge)
+#
+#   Stage 5 — sync-back   : Runs alongside to-prod (same trigger)
+#                           Opens PRs merging main/master forward into devBranch
+#                           and qaBranch so ongoing development isn't built on
+#                           top of the now-fixed bug → PRs require human review
+#                           (no auto-merge; conflicts, if any, resolved by hand)
+#
+# All stage resolution is done in the env-resolve pre-job; all other jobs
+# are gated on its output. Anything that doesn't match resolves to stage=skip.
+#
+# Caller passes all GitHub event context as inputs (required — no defaults for
+# integration branch names; each repo must declare them explicitly).
+#
+# Hotfix folders contain only kustomization.yaml + the renamed HelmRelease.
+# The app's ConfigMap / ExternalSecret / PVC stay owned by the main app folder
+# in the same namespace (copying them would create duplicate resource IDs).
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      # ── Build inputs ──────────────────────────────────────────────────────
+      imageRepository:
+        description: "Image repository name in dot notation (e.g. eit.cosmos.api)"
+        required: true
+        type: string
+      apiProjectName:
+        description: "API project folder name (e.g. EIT.Cosmos.MVP.Api)"
+        required: true
+        type: string
+      dockerfilePath:
+        description: "Path to the Dockerfile relative to repo root. Defaults to {apiProjectName}/Dockerfile."
+        required: false
+        type: string
+        default: ""
+      containerRegistry:
+        description: "Azure Container Registry FQDN (e.g. WEULZ3DXShNonProd.azurecr.io)"
+        required: true
+        type: string
+
+      # ── GitOps inputs ─────────────────────────────────────────────────────
+      fluxFolder:
+        description: "Flux GitOps folder name for this service (e.g. eit-cosmos-mvp)"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Root GitOps path inside Apps-GitOps (e.g. 3DX/flux/applications)"
+        required: true
+        type: string
+      ingressPrefix:
+        description: "Prefix for hotfix ingress hostnames (e.g. 'ds' → ds-{fluxFolder}-hotfix-{name}-dev.imcgrp-cloud.com)"
+        required: true
+        type: string
+      gitopsRepo:
+        description: "GitHub repository containing the GitOps manifests (org/repo)"
+        required: false
+        type: string
+        default: "imc-grp/Apps-GitOps"
+
+      # ── Environment configuration ─────────────────────────────────────────
+      devEnvironment:
+        description: "DEV environment folder name (e.g. dev)"
+        required: false
+        type: string
+        default: "dev"
+      qaEnvironment:
+        description: "QA environment folder name (e.g. qa)"
+        required: false
+        type: string
+        default: "qa"
+
+      # ── Integration branch names (no defaults — must be explicit per repo) ─
+      hotfixDevBranch:
+        description: "Hotfix DEV integration branch (e.g. hotfix-dev)"
+        required: false
+        type: string
+        default: "hotfix-dev"
+      hotfixQaBranch:
+        description: "Hotfix QA integration branch (e.g. hotfix-qa)"
+        required: false
+        type: string
+        default: "hotfix-qa"
+      devBranch:
+        description: "Ongoing DEV integration branch to sync the hotfix back into (e.g. develop)"
+        required: false
+        type: string
+        default: "develop"
+      qaBranch:
+        description: "Ongoing QA integration branch to sync the hotfix back into (e.g. qa)"
+        required: false
+        type: string
+        default: "qa"
+
+      # ── GitHub event context (passed from caller) ─────────────────────────
+      eventAction:
+        description: "github.event.action (e.g. opened, synchronize, closed)"
+        required: true
+        type: string
+      baseBranch:
+        description: "github.base_ref — the branch the PR targets"
+        required: true
+        type: string
+      headBranch:
+        description: "github.head_ref — the source branch of the PR"
+        required: true
+        type: string
+      merged:
+        description: "github.event.pull_request.merged as a string (true/false)"
+        required: true
+        type: string
+
+      # ── Tests (passed through to the build stage) ──────────────────
+      sonarProjectKey:
+        description: "SonarQube project key. Defaults to the repository name."
+        required: false
+        type: string
+        default: ""
+      solutionFile:
+        description: "Solution/project the tests build. Empty = dotnet build in the repo root."
+        required: false
+        type: string
+        default: ""
+      dotNetVersion:
+        description: ".NET SDK major version for the tests (e.g. 8)"
+        required: false
+        type: string
+        default: "8"
+      enforceGate:
+        description: "true = failing tests block the hotfix build; false = report-only"
+        required: false
+        type: boolean
+        default: true
+
+    secrets:
+      AZURE_SUBSCRIPTION_ID:
+        description: "Azure subscription ID used for Managed Identity ACR login"
+        required: true
+      FLUX_GITOPS_APPLICATION_PAT:
+        description: "PAT with contents:write and pull-requests:write on the GitOps repo"
+        required: false
+      NUGET_CONFIG_CONTENT:
+        description: "NuGet.Config XML for private feed auth — omit if not needed"
+        required: false
+      TLS_CRT_CONTENT:
+        description: "TLS certificate content paired with NUGET_CONFIG_CONTENT — omit if not needed"
+        required: false
+      SONAR_URL:
+        description: "URL of the SonarQube server"
+        required: false
+      SONAR_TOKEN:
+        description: "SonarQube token allowed to run analyses"
+        required: false
+
+jobs:
+  # ── Pre-job: resolve which stage to run ──────────────────────────────────
+  env-resolve:
+    name: Resolve hotfix stage
+    runs-on: ubuntu-latest
+    outputs:
+      stage:           ${{ steps.resolve.outputs.stage }}
+      hotfixBranchRef: ${{ steps.resolve.outputs.hotfixBranchRef }}
+      hotfixName:      ${{ steps.resolve.outputs.hotfixName }}
+
+    steps:
+      - name: Resolve stage from event context
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          ACTION="${{ inputs.eventAction }}"
+          BASE="${{ inputs.baseBranch }}"
+          HEAD="${{ inputs.headBranch }}"
+          MERGED="${{ inputs.merged }}"
+          HOTFIX_DEV="${{ inputs.hotfixDevBranch }}"
+          HOTFIX_QA="${{ inputs.hotfixQaBranch }}"
+
+          STAGE="skip"
+
+          if [ "${BASE}" = "${HOTFIX_DEV}" ] && \
+             { [ "${ACTION}" = "opened" ] || [ "${ACTION}" = "synchronize" ] || [ "${ACTION}" = "reopened" ]; }; then
+            STAGE="build"
+
+          elif [ "${BASE}" = "${HOTFIX_DEV}" ] && \
+               [ "${ACTION}" = "closed" ] && [ "${MERGED}" = "true" ]; then
+            STAGE="deploy-dev"
+
+          elif [ "${BASE}" = "${HOTFIX_QA}" ] && \
+               [ "${ACTION}" = "closed" ] && [ "${MERGED}" = "true" ]; then
+            STAGE="promote-qa"
+
+          elif { [ "${BASE}" = "main" ] || [ "${BASE}" = "master" ]; } && \
+               [ "${ACTION}" = "closed" ] && [ "${MERGED}" = "true" ] && \
+               [ "${HEAD}" = "${HOTFIX_QA}" ]; then
+            STAGE="to-prod"
+          fi
+
+          # Derive sanitized hotfix name from head branch
+          SUFFIX="${HEAD#hotfix/}"
+          CLEAN=$(echo "${SUFFIX}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9-]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+          CLEAN="${CLEAN:0:18}"
+          CLEAN="${CLEAN%-}"
+
+          echo "stage=${STAGE}"         >> "$GITHUB_OUTPUT"
+          echo "hotfixBranchRef=${HEAD}" >> "$GITHUB_OUTPUT"
+          echo "hotfixName=${CLEAN}"    >> "$GITHUB_OUTPUT"
+
+          echo "Resolved stage   : ${STAGE}"
+          echo "Head branch      : ${HEAD}"
+          echo "Hotfix name      : ${CLEAN}"
+          echo "Base branch      : ${BASE}"
+          echo "Action           : ${ACTION}"
+          echo "Merged           : ${MERGED}"
+
+  # ── Stage 1: Build ────────────────────────────────────────────────────────
+  # Calls the golden-path build with hotfixBranchRef set:
+  #   - pushes hotfix-{name} tag in addition to run_id and latest
+  #   - skips GitOps dev update (handled by deploy-dev stage)
+  build:
+    name: Build hotfix image
+    needs: env-resolve
+    if: needs.env-resolve.outputs.stage == 'build'
+    uses: imc-grp/shared_workflows/.github/workflows/build-and-deploy.yaml@v3
+    secrets: inherit
+    with:
+      imageRepository:  ${{ inputs.imageRepository }}
+      apiProjectName:   ${{ inputs.apiProjectName }}
+      dockerfilePath:   ${{ inputs.dockerfilePath }}
+      containerRegistry: ${{ inputs.containerRegistry }}
+      fluxFolder:       ${{ inputs.fluxFolder }}
+      fluxRoot:         ${{ inputs.fluxRoot }}
+      gitopsRepo:       ${{ inputs.gitopsRepo }}
+      hotfixBranchRef:  ${{ needs.env-resolve.outputs.hotfixBranchRef }}
+      sonarProjectKey:  ${{ inputs.sonarProjectKey }}
+      solutionFile:     ${{ inputs.solutionFile }}
+      dotNetVersion:    ${{ inputs.dotNetVersion }}
+      enforceGate:      ${{ inputs.enforceGate }}
+
+  # ── Stage 2: Deploy to DEV ────────────────────────────────────────────────
+  # Creates a parallel hotfix folder in GitOps base/dev and opens a PR
+  deploy-dev:
+    name: Deploy hotfix to DEV
+    needs: env-resolve
+    if: needs.env-resolve.outputs.stage == 'deploy-dev'
+    runs-on: ["self-hosted", "Region:il"]
+
+    steps:
+      # ── 1. Derive names ────────────────────────────────────────────────────
+      - name: Derive hotfix names and paths
+        id: names
+        run: |
+          set -euo pipefail
+          CLEAN="${{ needs.env-resolve.outputs.hotfixName }}"
+
+          if [ -z "${CLEAN}" ]; then
+            echo "::error::Could not derive hotfix name from branch '${{ needs.env-resolve.outputs.hotfixBranchRef }}'."
+            exit 1
+          fi
+
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+          ENV="${{ inputs.devEnvironment }}"
+          HOTFIX_DIR="${FLUX_FOLDER}-hotfix-${CLEAN}"
+          IMAGE_TAG="hotfix-${CLEAN}"
+          INGRESS_HOST="${{ inputs.ingressPrefix }}-${FLUX_FOLDER}-hotfix-${CLEAN}-${ENV}.imcgrp-cloud.com"
+          BRANCH="deploy/${ENV}/hotfix-${FLUX_FOLDER}-${CLEAN}"
+
+          echo "hotfix_name=${CLEAN}"           >> "$GITHUB_OUTPUT"
+          echo "hotfix_dir=${HOTFIX_DIR}"       >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}"         >> "$GITHUB_OUTPUT"
+          echo "ingress_host=${INGRESS_HOST}"   >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}"               >> "$GITHUB_OUTPUT"
+
+          echo "Hotfix name  : ${CLEAN}"
+          echo "Hotfix dir   : ${HOTFIX_DIR}"
+          echo "Image tag    : ${IMAGE_TAG}"
+          echo "Ingress host : ${INGRESS_HOST}"
+          echo "Branch       : ${BRANCH}"
+
+      # ── 2. Lookup hotfix image digest from ACR ─────────────────────────────
+      # The build stage already pushed hotfix-{name} tag; we look up its digest
+      # here so this stage is self-contained (no cross-job output dependency).
+      - name: Lookup hotfix image digest
+        id: digest
+        run: |
+          set -euo pipefail
+          az login --identity
+          DIGEST=$(az acr manifest show \
+            --registry "${REGISTRY%%.*}" \
+            --name "${{ inputs.imageRepository }}" \
+            --manifest "${{ steps.names.outputs.image_tag }}" \
+            --query "digest" -o tsv 2>/dev/null || echo "")
+          echo "image_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Digest : ${DIGEST:-<not available>}"
+        env:
+          REGISTRY: ${{ inputs.containerRegistry }}
+
+      # ── 3. Checkout GitOps repo ────────────────────────────────────────────
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+
+      # ── 3. Install yq ─────────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      # ── 4. Configure git ──────────────────────────────────────────────────
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 5. Create or update hotfix parallel folder ─────────────────────────
+      - name: Create or update hotfix parallel folder
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          ENV: ${{ inputs.devEnvironment }}
+          HOTFIX_DIR: ${{ steps.names.outputs.hotfix_dir }}
+          IMAGE_TAG: ${{ steps.names.outputs.image_tag }}
+          INGRESS_HOST: ${{ steps.names.outputs.ingress_host }}
+        run: |
+          set -euo pipefail
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+          SRC_DIR="${BASE_PATH}/${ENV}/${FLUX_FOLDER}"
+          HOTFIX_FOLDER="${BASE_PATH}/${ENV}/${HOTFIX_DIR}"
+          OVERLAY_FILE="${OVERLAYS_PATH}/${ENV}/kustomization.yaml"
+
+          if [ ! -d "${SRC_DIR}" ]; then
+            echo "::error::Source directory not found: ${SRC_DIR}"
+            exit 1
+          fi
+
+          if [ ! -d "${HOTFIX_FOLDER}" ]; then
+            echo "First deploy — creating hotfix folder from source."
+            cp -r "${SRC_DIR}" "${HOTFIX_FOLDER}"
+
+            # Discover the helmrelease file in the copied folder (glob match)
+            HOTFIX_HR=$(find "${HOTFIX_FOLDER}" -maxdepth 1 \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) | sort | head -1)
+            if [ -z "${HOTFIX_HR}" ]; then
+              echo "::error::No helmrelease file found in copied folder ${HOTFIX_FOLDER}"
+              exit 1
+            fi
+
+            # Keep only the HelmRelease - ConfigMap/ExternalSecret/PVC stay owned by the main folder.
+            HR_BASENAME=$(basename "${HOTFIX_HR}")
+            find "${HOTFIX_FOLDER}" -maxdepth 1 -type f ! -name "${HR_BASENAME}" ! -name kustomization.yaml -delete
+            yq -i ".resources = [\"${HR_BASENAME}\"]" "${HOTFIX_FOLDER}/kustomization.yaml"
+
+            yq -i ".metadata.name                               = \"${HOTFIX_DIR}\""   "${HOTFIX_HR}"
+            yq -i ".spec.values.nameOverride                    = \"${HOTFIX_DIR}\""   "${HOTFIX_HR}"
+            yq -i ".spec.values.fullnameOverride                = \"${HOTFIX_DIR}\""   "${HOTFIX_HR}"
+            DIGEST="${{ steps.digest.outputs.image_digest }}"
+            if [ -n "${DIGEST}" ]; then
+              yq -i "del(.spec.values.image.tag)" "${HOTFIX_HR}"
+              yq -i ".spec.values.image.digest = \"${DIGEST}\"" "${HOTFIX_HR}"
+              echo "  Digest : ${DIGEST}"
+            else
+              yq -i ".spec.values.image.tag = \"${IMAGE_TAG}\"" "${HOTFIX_HR}"
+            fi
+            yq -i ".spec.values.ingress.hosts[0].host           = \"${INGRESS_HOST}\"" "${HOTFIX_HR}"
+            yq -i ".spec.values.ingress.tls.entries[0].hosts[0] = \"${INGRESS_HOST}\"" "${HOTFIX_HR}"
+            yq -i ".spec.values.service.labels.app              = \"${HOTFIX_DIR}\""   "${HOTFIX_HR}"
+            yq -i ".spec.values.deployment.podLabels.app        = \"${HOTFIX_DIR}\""   "${HOTFIX_HR}"
+            echo "Applied overrides to ${HOTFIX_HR}"
+
+            if [ -f "${OVERLAY_FILE}" ]; then
+              RESOURCE_ENTRY="  - ../../base/${ENV}/${HOTFIX_DIR}"
+              if ! grep -qF "${RESOURCE_ENTRY}" "${OVERLAY_FILE}"; then
+                echo "${RESOURCE_ENTRY}" >> "${OVERLAY_FILE}"
+                echo "Added ${HOTFIX_DIR} to ${OVERLAY_FILE}"
+              fi
+            fi
+          else
+            echo "Subsequent push — updating image reference."
+            # Discover the helmrelease file (glob match in case filename differs)
+            HOTFIX_HR=$(find "${HOTFIX_FOLDER}" -maxdepth 1 \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) | sort | head -1)
+            if [ -z "${HOTFIX_HR}" ]; then
+              echo "::error::No helmrelease file found in ${HOTFIX_FOLDER}"
+              exit 1
+            fi
+            DIGEST="${{ steps.digest.outputs.image_digest }}"
+            if [ -n "${DIGEST}" ]; then
+              yq -i "del(.spec.values.image.tag)" "${HOTFIX_HR}"
+              yq -i ".spec.values.image.digest = \"${DIGEST}\"" "${HOTFIX_HR}"
+              echo "Updated image.digest → ${DIGEST}"
+            else
+              yq -i ".spec.values.image.tag = \"${IMAGE_TAG}\"" "${HOTFIX_HR}"
+              echo "Updated image.tag → ${IMAGE_TAG}"
+            fi
+          fi
+
+      # ── 6. Commit and push ─────────────────────────────────────────────────
+      - name: Commit and push branch
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          BRANCH: ${{ steps.names.outputs.branch }}
+          HOTFIX_DIR: ${{ steps.names.outputs.hotfix_dir }}
+        run: |
+          set -euo pipefail
+          git checkout -b "${BRANCH}"
+          git add "${BASE_PATH}/" "${OVERLAYS_PATH}/"
+          git commit -m "hotfix(dev): deploy ${{ inputs.fluxFolder }} [${HOTFIX_DIR}]"
+          git push origin "${BRANCH}"
+
+      # ── 7. Open pull request ───────────────────────────────────────────────
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          BRANCH: ${{ steps.names.outputs.branch }}
+          HOTFIX_DIR: ${{ steps.names.outputs.hotfix_dir }}
+          IMAGE_TAG: ${{ steps.names.outputs.image_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          PR_BODY=$(printf '## Hotfix Deploy to DEV\n\n**Service:** `%s`\n**Hotfix folder:** `%s`\n**Environment:** `%s`\n**Image tag:** `%s`\n\n*Triggered by workflow run [`%s`](%s).*' \
+            "${{ inputs.fluxFolder }}" "${HOTFIX_DIR}" "dev" \
+            "${IMAGE_TAG}" "${RUN_ID}" "${RUN_URL}")
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "${BRANCH}" \
+            --base main \
+            --title "hotfix(dev): ${{ inputs.fluxFolder }} [${{ needs.env-resolve.outputs.hotfixName }}]" \
+            --body "${PR_BODY}"
+
+  # ── Stage 3: Promote to QA ────────────────────────────────────────────────
+  # Single GitOps PR: creates QA hotfix folder (from QA main), removes DEV folder
+  promote-qa:
+    name: Promote hotfix DEV → QA
+    needs: env-resolve
+    if: needs.env-resolve.outputs.stage == 'promote-qa'
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout GitOps repo ────────────────────────────────────────────
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+
+      # ── 2. Install yq ─────────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      # ── 3. Configure git ──────────────────────────────────────────────────
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 4. Discover DEV hotfix, create QA hotfix, clean up DEV ────────────
+      - name: Promote hotfix to QA and clean up DEV
+        id: promote
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          DEV_ENV: ${{ inputs.devEnvironment }}
+          QA_ENV: ${{ inputs.qaEnvironment }}
+        run: |
+          set -euo pipefail
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+          INGRESS_PFX="${{ inputs.ingressPrefix }}"
+
+          DEV_BASE="${BASE_PATH}/${DEV_ENV}"
+          QA_BASE="${BASE_PATH}/${QA_ENV}"
+
+          # ── Discover active hotfix folder in DEV ──────────────────────────
+          FOUND=$(find "${DEV_BASE}" -maxdepth 1 -type d -name "${FLUX_FOLDER}-hotfix-*" | sort | head -1)
+          if [ -z "${FOUND}" ]; then
+            echo "::error::No hotfix folder matching '${FLUX_FOLDER}-hotfix-*' found in ${DEV_BASE}"
+            exit 1
+          fi
+          HOTFIX_DIR=$(basename "${FOUND}")
+          HOTFIX_NAME="${HOTFIX_DIR#${FLUX_FOLDER}-hotfix-}"
+
+          echo "hotfix_dir=${HOTFIX_DIR}"   >> "$GITHUB_OUTPUT"
+          echo "hotfix_name=${HOTFIX_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Discovered hotfix: ${HOTFIX_DIR} (name: ${HOTFIX_NAME})"
+
+          # ── Read image reference from DEV hotfix HelmRelease ────────────────
+          DEV_HR=$(find "${DEV_BASE}/${HOTFIX_DIR}" -maxdepth 1 \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) | sort | head -1)
+          if [ -z "${DEV_HR}" ]; then
+            echo "::error::No helmrelease file found in ${DEV_BASE}/${HOTFIX_DIR}"
+            exit 1
+          fi
+          IMAGE_TAG=$(yq '.spec.values.image.tag // ""' "${DEV_HR}")
+          [ "${IMAGE_TAG}" = "null" ] && IMAGE_TAG=""
+          IMAGE_DIGEST=$(yq '.spec.values.image.digest // ""' "${DEV_HR}")
+          [ "${IMAGE_DIGEST}" = "null" ] && IMAGE_DIGEST=""
+          # Digest-only manifests have no tag field — derive a display tag from the digest
+          if [ -z "${IMAGE_TAG}" ] && [ -n "${IMAGE_DIGEST}" ]; then
+            IMAGE_TAG="sha-${IMAGE_DIGEST#sha256:}"
+            IMAGE_TAG="${IMAGE_TAG:0:20}"
+          fi
+          if [ -z "${IMAGE_TAG}" ] && [ -z "${IMAGE_DIGEST}" ]; then
+            echo "::error::No image.tag or image.digest found in ${DEV_HR}"
+            exit 1
+          fi
+          echo "image_tag=${IMAGE_TAG}"       >> "$GITHUB_OUTPUT"
+          echo "image_digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+          [ -n "${IMAGE_DIGEST}" ] && echo "Image reference: ${IMAGE_DIGEST} (tag: ${IMAGE_TAG})" || echo "Image tag: ${IMAGE_TAG}"
+
+          # ── Create QA hotfix folder (based on QA main) ────────────────────
+          QA_SRC="${QA_BASE}/${FLUX_FOLDER}"
+          QA_HOTFIX="${QA_BASE}/${HOTFIX_DIR}"
+          if [ ! -d "${QA_SRC}" ]; then
+            echo "::error::QA source folder not found: ${QA_SRC}"
+            exit 1
+          fi
+
+          QA_INGRESS="${INGRESS_PFX}-${FLUX_FOLDER}-hotfix-${HOTFIX_NAME}-${QA_ENV}.imcgrp-cloud.com"
+          cp -r "${QA_SRC}" "${QA_HOTFIX}"
+          QA_HR=$(find "${QA_HOTFIX}" -maxdepth 1 \
+            \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+            | sort | head -1)
+          if [ -z "${QA_HR}" ]; then
+            echo "::error::No helmrelease file found in ${QA_HOTFIX}"
+            exit 1
+          fi
+          QA_HR_BASENAME=$(basename "${QA_HR}")
+          find "${QA_HOTFIX}" -maxdepth 1 -type f ! -name "${QA_HR_BASENAME}" ! -name kustomization.yaml -delete
+          yq -i ".resources = [\"${QA_HR_BASENAME}\"]" "${QA_HOTFIX}/kustomization.yaml"
+
+          yq -i ".metadata.name                               = \"${HOTFIX_DIR}\""   "${QA_HR}"
+          yq -i ".spec.values.nameOverride                    = \"${HOTFIX_DIR}\""   "${QA_HR}"
+          yq -i ".spec.values.fullnameOverride                = \"${HOTFIX_DIR}\""   "${QA_HR}"
+          QA_DIGEST="${IMAGE_DIGEST}"
+          if [ -n "${QA_DIGEST}" ]; then
+            yq -i "del(.spec.values.image.tag)" "${QA_HR}"
+            yq -i ".spec.values.image.digest = \"${QA_DIGEST}\"" "${QA_HR}"
+            echo "  Propagated digest: ${QA_DIGEST}"
+          else
+            yq -i ".spec.values.image.tag = \"${IMAGE_TAG}\"" "${QA_HR}"
+          fi
+          yq -i ".spec.values.ingress.hosts[0].host           = \"${QA_INGRESS}\""   "${QA_HR}"
+          yq -i ".spec.values.ingress.tls.entries[0].hosts[0] = \"${QA_INGRESS}\""   "${QA_HR}"
+          yq -i ".spec.values.service.labels.app              = \"${HOTFIX_DIR}\""   "${QA_HR}"
+          yq -i ".spec.values.deployment.podLabels.app        = \"${HOTFIX_DIR}\""   "${QA_HR}"
+          echo "Created QA hotfix folder: ${QA_HOTFIX}"
+
+          # ── Add QA hotfix entry to QA overlay ─────────────────────────────
+          QA_OVERLAY="${OVERLAYS_PATH}/${QA_ENV}/kustomization.yaml"
+          if [ -f "${QA_OVERLAY}" ]; then
+            QA_ENTRY="  - ../../base/${QA_ENV}/${HOTFIX_DIR}"
+            if ! grep -qF "${QA_ENTRY}" "${QA_OVERLAY}"; then
+              echo "${QA_ENTRY}" >> "${QA_OVERLAY}"
+              echo "Added ${HOTFIX_DIR} to QA overlay"
+            fi
+          fi
+
+          # ── Remove DEV hotfix folder ──────────────────────────────────────
+          rm -rf "${DEV_BASE}/${HOTFIX_DIR}"
+          echo "Removed DEV hotfix folder: ${DEV_BASE}/${HOTFIX_DIR}"
+
+          # ── Remove DEV hotfix entry from DEV overlay ──────────────────────
+          DEV_OVERLAY="${OVERLAYS_PATH}/${DEV_ENV}/kustomization.yaml"
+          if [ -f "${DEV_OVERLAY}" ]; then
+            yq -i "del(.resources[] | select(. == \"../../base/${DEV_ENV}/${HOTFIX_DIR}\"))" "${DEV_OVERLAY}"
+            echo "Removed ${HOTFIX_DIR} from DEV overlay"
+          fi
+
+      # ── 5. Commit and push ─────────────────────────────────────────────────
+      - name: Commit and push branch
+        id: git
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          HOTFIX_NAME: ${{ steps.promote.outputs.hotfix_name }}
+        run: |
+          set -euo pipefail
+          BRANCH="hotfix-promote/qa/${{ inputs.fluxFolder }}-${HOTFIX_NAME}"
+          echo "branchName=${BRANCH}" >> "$GITHUB_OUTPUT"
+          git checkout -b "${BRANCH}"
+          git add "${BASE_PATH}/" "${OVERLAYS_PATH}/"
+          git commit -m "hotfix-promote(qa): ${{ inputs.fluxFolder }} [${{ steps.promote.outputs.hotfix_dir }}] dev→qa + cleanup dev"
+          git push origin "${BRANCH}"
+
+      # ── 6. Open pull request ───────────────────────────────────────────────
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          HOTFIX_DIR: ${{ steps.promote.outputs.hotfix_dir }}
+          IMAGE_TAG: ${{ steps.promote.outputs.image_tag }}
+          BRANCH: ${{ steps.git.outputs.branchName }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          PR_BODY=$(printf '## Hotfix Promote DEV → QA\n\n**Service:** `%s`\n**Hotfix:** `%s`\n**Image tag:** `%s`\n\n**Changes in this PR:**\n- ✅ Created QA hotfix folder `%s`\n- 🗑️  Removed DEV hotfix folder `%s`\n\n*Triggered by workflow run [`%s`](%s).*' \
+            "${{ inputs.fluxFolder }}" "${HOTFIX_DIR}" "${IMAGE_TAG}" \
+            "${HOTFIX_DIR}" "${HOTFIX_DIR}" "${RUN_ID}" "${RUN_URL}")
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "${BRANCH}" \
+            --base main \
+            --title "hotfix-promote(qa): ${{ inputs.fluxFolder }} [${HOTFIX_DIR}]" \
+            --body "${PR_BODY}"
+
+  # ── Stage 4: Apply to Prod ────────────────────────────────────────────────
+  # Patches all *-prod HelmReleases with the hotfix image tag, removes QA folder
+  # Does NOT auto-merge — requires human review
+  to-prod:
+    name: Apply hotfix to Prod
+    needs: env-resolve
+    if: needs.env-resolve.outputs.stage == 'to-prod'
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout GitOps repo ────────────────────────────────────────────
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+
+      # ── 2. Install yq ─────────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      # ── 3. Configure git ──────────────────────────────────────────────────
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 4. Discover QA hotfix, patch prod, clean up QA ────────────────────
+      - name: Apply hotfix to prod and clean up QA
+        id: apply
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          QA_ENV: ${{ inputs.qaEnvironment }}
+        run: |
+          set -euo pipefail
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+          QA_BASE="${BASE_PATH}/${QA_ENV}"
+
+          # ── Discover active hotfix folder in QA ───────────────────────────
+          FOUND=$(find "${QA_BASE}" -maxdepth 1 -type d -name "${FLUX_FOLDER}-hotfix-*" | sort | head -1)
+          if [ -z "${FOUND}" ]; then
+            echo "::error::No hotfix folder matching '${FLUX_FOLDER}-hotfix-*' found in ${QA_BASE}"
+            exit 1
+          fi
+          HOTFIX_DIR=$(basename "${FOUND}")
+          HOTFIX_NAME="${HOTFIX_DIR#${FLUX_FOLDER}-hotfix-}"
+
+          echo "hotfix_dir=${HOTFIX_DIR}"   >> "$GITHUB_OUTPUT"
+          echo "hotfix_name=${HOTFIX_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Discovered hotfix: ${HOTFIX_DIR}"
+
+          # ── Read image reference from QA hotfix HelmRelease ─────────────────
+          QA_HR=$(find "${QA_BASE}/${HOTFIX_DIR}" -maxdepth 1 \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) | sort | head -1)
+          if [ -z "${QA_HR}" ]; then
+            echo "::error::No helmrelease file found in ${QA_BASE}/${HOTFIX_DIR}"
+            exit 1
+          fi
+          IMAGE_TAG=$(yq '.spec.values.image.tag // ""' "${QA_HR}")
+          [ "${IMAGE_TAG}" = "null" ] && IMAGE_TAG=""
+          IMAGE_DIGEST=$(yq '.spec.values.image.digest // ""' "${QA_HR}")
+          [ "${IMAGE_DIGEST}" = "null" ] && IMAGE_DIGEST=""
+          # Digest-only manifests have no tag field — derive a display tag from the digest
+          if [ -z "${IMAGE_TAG}" ] && [ -n "${IMAGE_DIGEST}" ]; then
+            IMAGE_TAG="sha-${IMAGE_DIGEST#sha256:}"
+            IMAGE_TAG="${IMAGE_TAG:0:20}"
+          fi
+          if [ -z "${IMAGE_TAG}" ] && [ -z "${IMAGE_DIGEST}" ]; then
+            echo "::error::No image.tag or image.digest found in ${QA_HR}"
+            exit 1
+          fi
+          echo "image_tag=${IMAGE_TAG}"       >> "$GITHUB_OUTPUT"
+          echo "image_digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+          [ -n "${IMAGE_DIGEST}" ] && echo "Hotfix image: ${IMAGE_DIGEST} (tag: ${IMAGE_TAG})" || echo "Hotfix image tag: ${IMAGE_TAG}"
+
+          # ── Patch all *-prod / prod HelmRelease manifests ────────────────
+          PROD_COUNT=0
+          while IFS= read -r PROD_DIR; do
+            PROD_HR=$(find "${PROD_DIR}/${FLUX_FOLDER}" -maxdepth 1 \
+              \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+              | sort | head -1 || true)
+            if [ -f "${PROD_HR}" ]; then
+              PROD_DIGEST="${IMAGE_DIGEST}"
+              if [ -n "${PROD_DIGEST}" ]; then
+                yq -i "del(.spec.values.image.tag)" "${PROD_HR}"
+                yq -i ".spec.values.image.digest = \"${PROD_DIGEST}\"" "${PROD_HR}"
+                echo "✓ Patched ${PROD_HR} → ${PROD_DIGEST}"
+              else
+                yq -i ".spec.values.image.tag = \"${IMAGE_TAG}\"" "${PROD_HR}"
+                echo "✓ Patched ${PROD_HR} → ${IMAGE_TAG}"
+              fi
+              PROD_COUNT=$((PROD_COUNT + 1))
+            else
+              echo "::warning::Prod HelmRelease not found: ${PROD_HR} — skipping."
+            fi
+          done < <(find "${BASE_PATH}" -maxdepth 1 -type d -name '*prod' | sort)
+
+          if [ "${PROD_COUNT}" -eq 0 ]; then
+            echo "::error::No *-prod HelmReleases were updated. Verify fluxRoot and fluxFolder."
+            exit 1
+          fi
+          echo "Updated ${PROD_COUNT} prod HelmRelease(s)."
+
+          # ── Remove QA hotfix folder ───────────────────────────────────────
+          rm -rf "${QA_BASE}/${HOTFIX_DIR}"
+          echo "Removed QA hotfix folder: ${QA_BASE}/${HOTFIX_DIR}"
+
+          # ── Remove QA hotfix entry from QA overlay ────────────────────────
+          QA_OVERLAY="${OVERLAYS_PATH}/${QA_ENV}/kustomization.yaml"
+          if [ -f "${QA_OVERLAY}" ]; then
+            yq -i "del(.resources[] | select(. == \"../../base/${QA_ENV}/${HOTFIX_DIR}\"))" "${QA_OVERLAY}"
+            echo "Removed ${HOTFIX_DIR} from QA overlay"
+          fi
+
+          # ── Advisory: validate DEV has no lingering hotfix ────────────────
+          DEV_HOTFIX=$(find "${BASE_PATH}" -maxdepth 3 -type d \
+            -name "${FLUX_FOLDER}-hotfix-*" \
+            -not -path "*/${QA_ENV}/*" \
+            -not -path "*-prod/*" | head -1)
+          if [ -n "${DEV_HOTFIX}" ]; then
+            echo "::warning::Lingering DEV hotfix folder detected: ${DEV_HOTFIX}"
+            echo "  This should have been cleaned up during the promote-qa stage."
+          else
+            echo "✓ DEV has no lingering hotfix folder."
+          fi
+
+      # ── 5. Commit and push ─────────────────────────────────────────────────
+      - name: Commit and push branch
+        id: git
+        env:
+          BASE_PATH: ${{ inputs.fluxRoot }}/base
+          OVERLAYS_PATH: ${{ inputs.fluxRoot }}/overlays
+          HOTFIX_NAME: ${{ steps.apply.outputs.hotfix_name }}
+          IMAGE_TAG: ${{ steps.apply.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="hotfix-promote/prod/${{ inputs.fluxFolder }}-${HOTFIX_NAME}"
+          echo "branchName=${BRANCH}" >> "$GITHUB_OUTPUT"
+          git checkout -b "${BRANCH}"
+          git add "${BASE_PATH}/" "${OVERLAYS_PATH}/"
+          git commit -m "hotfix-promote(prod): ${{ inputs.fluxFolder }} [${{ steps.apply.outputs.hotfix_dir }}] → ${IMAGE_TAG}"
+          git push origin "${BRANCH}"
+
+      # ── 6. Open pull request (requires human review — no auto-merge) ───────
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          HOTFIX_DIR: ${{ steps.apply.outputs.hotfix_dir }}
+          IMAGE_TAG: ${{ steps.apply.outputs.image_tag }}
+          BRANCH: ${{ steps.git.outputs.branchName }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          PR_BODY=$(printf '## ⚠️ Hotfix to Prod — Requires Review\n\n**Service:** `%s`\n**Hotfix:** `%s`\n**Image tag:** `%s`\n\n**Changes in this PR:**\n- 🚀 All `*-prod` HelmReleases patched with image tag `%s`\n- 🗑️  QA hotfix folder `%s` removed\n\n> **This PR will NOT auto-merge. Human review and approval required.**\n\n*Triggered by workflow run [`%s`](%s).*' \
+            "${{ inputs.fluxFolder }}" "${HOTFIX_DIR}" "${IMAGE_TAG}" \
+            "${IMAGE_TAG}" "${HOTFIX_DIR}" "${RUN_ID}" "${RUN_URL}")
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "${BRANCH}" \
+            --base main \
+            --title "⚠️ hotfix-promote(prod): ${{ inputs.fluxFolder }} [${HOTFIX_DIR}] → ${IMAGE_TAG}" \
+            --body "${PR_BODY}"
+
+  # ── Stage 5: Sync back to dev/qa ──────────────────────────────────────────
+  # By the time this runs, the source PR (hotfixQaBranch → main/master) is
+  # already merged (that's the trigger for this whole run) — so main/master
+  # already has the fix. devBranch and qaBranch don't, and never will unless
+  # something merges it forward: left alone, the next regular release built
+  # from devBranch would silently ship without the fix and undo it in prod.
+  #
+  # Runs in parallel with to-prod (not after it) — this is a source-branch
+  # concern independent of whether the GitOps prod patch is merged yet.
+  # Opens plain PRs (main/master → devBranch, main/master → qaBranch). Does
+  # NOT auto-merge: a clean PR can be merged as-is, a conflicting one (rare)
+  # needs a human to resolve it.
+  sync-back:
+    name: Sync hotfix back to dev/qa
+    needs: env-resolve
+    if: needs.env-resolve.outputs.stage == 'to-prod'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      - name: Open sync-back PRs (main → dev/qa)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD: ${{ inputs.baseBranch }}
+          HOTFIX_NAME: ${{ needs.env-resolve.outputs.hotfixName }}
+        run: |
+          set -uo pipefail
+
+          open_sync_pr() {
+            BASE="$1"
+            BODY=$(printf '## Hotfix sync-back\n\nMerges `%s` into `%s` so ongoing development includes the fix that just shipped to prod (hotfix `%s`).\n\nPlease resolve any conflicts before merging — do not close without merging, or the fix will be lost on the next regular release out of `%s`.' \
+              "${HEAD}" "${BASE}" "${HOTFIX_NAME}" "${BASE}")
+            if gh pr create \
+              --repo "${{ github.repository }}" \
+              --head "${HEAD}" \
+              --base "${BASE}" \
+              --title "chore(hotfix-sync): ${HEAD} → ${BASE} [${HOTFIX_NAME}]" \
+              --body "${BODY}"; then
+              echo "✓ Opened sync-back PR: ${HEAD} → ${BASE}"
+            else
+              echo "No PR opened for ${HEAD} → ${BASE} (already up to date, or a sync-back PR is already open — check manually if unsure)."
+            fi
+          }
+
+          open_sync_pr "${{ inputs.devBranch }}"
+          open_sync_pr "${{ inputs.qaBranch }}"

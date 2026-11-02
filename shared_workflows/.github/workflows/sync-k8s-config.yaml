@@ -1,0 +1,319 @@
+name: Sync K8S config to GitOps (v2)
+
+# ────────────────────────────────────────────────────────────────────────────
+# Day-2 sync of an app repo's K8S/ folder into the GitOps repo.
+#
+#   K8S/configmap-<env>.yaml   ConfigMap; .data (upsert, never deletes keys) and
+#                              .metadata name/namespace/labels/annotations (name/namespace replaced,
+#                              labels/annotations merged) are read
+#   K8S/external-secrets.yaml  ExternalSecret; .spec.data (append/update, never deletes),
+#                              .metadata name/namespace/labels/annotations and .spec.target.name are read
+#
+# Renaming a ConfigMap / ExternalSecret target re-points the HelmRelease references automatically.
+# external-secrets.yaml is shared by every ticked env, so its metadata applies to all of them.
+#
+# Per ticked env it edits {fluxRoot}/base/<envFolder>/{fluxFolder}/ and opens one PR on
+# branch config/<env>/<fluxFolder>, which the GitOps repo's autopromote.yaml merges.
+# Prod = every folder listed in the GitOps repo variable PROD_FOLDER_SUFFIX_PAIRS.
+# The app folder must already exist in the env (created by onboarding / promote).
+#
+# The K8S/ files are read from the CALLER repo at the ref the workflow was dispatched on.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      fluxFolder:
+        description: "GitOps folder / app name (e.g. orders-api)"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Path to flux/applications inside the GitOps repo"
+        required: true
+        type: string
+      gitopsRepo:
+        description: "GitOps repository (org/repo)"
+        required: true
+        type: string
+      dev:
+        required: false
+        type: boolean
+        default: false
+      qa:
+        required: false
+        type: boolean
+        default: false
+      prod:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      FLUX_GITOPS_APPLICATION_PAT:
+        description: "PAT with contents:write and pull-requests:write on the GitOps repo, and read access to its Actions variables"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync K8S/ to GitOps
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sync-k8s-config-${{ inputs.gitopsRepo }}-${{ inputs.fluxFolder }}
+      cancel-in-progress: false
+    env:
+      APP:        ${{ inputs.fluxFolder }}
+      FLUX_ROOT:  ${{ inputs.fluxRoot }}
+      GITOPS_REPO: ${{ inputs.gitopsRepo }}
+      DO_DEV:     ${{ inputs.dev }}
+      DO_QA:      ${{ inputs.qa }}
+      DO_PROD:    ${{ inputs.prod }}
+
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v5
+        with:
+          path: app-repo
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+          path: gitops-repo
+
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Validate K8S/ and normalise inputs
+        run: |
+          set -euo pipefail
+          [ "${DO_DEV}${DO_QA}${DO_PROD}" != "falsefalsefalse" ] || { echo "::error::Tick at least one environment."; exit 1; }
+
+          K8S="app-repo/K8S"
+          OUT="${RUNNER_TEMP}/k8s"
+          mkdir -p "${OUT}"
+          [ -d "${K8S}" ] || { echo "::error::No K8S/ folder at the repository root of the branch this workflow ran on."; exit 1; }
+
+          while IFS= read -r F; do
+            case "${F}" in
+              configmap-dev.yaml|configmap-qa.yaml|configmap-prod.yaml|configmap.yaml|external-secrets.yaml) ;;
+              *) echo "::error::Unexpected entry K8S/${F}. Allowed: configmap-dev.yaml, configmap-qa.yaml, configmap-prod.yaml, external-secrets.yaml."; exit 1 ;;
+            esac
+          done < <(find "${K8S}" -mindepth 1 -maxdepth 1 -printf '%f\n')
+
+          for E in dev qa prod; do
+            SRC="${K8S}/configmap-${E}.yaml"
+            # Legacy single-file name is honoured for dev only.
+            if [ "${E}" = "dev" ] && [ ! -f "${SRC}" ] && [ -f "${K8S}/configmap.yaml" ]; then SRC="${K8S}/configmap.yaml"; fi
+            [ -f "${SRC}" ] || continue
+            [ "$(yq '.kind' "${SRC}")" = "ConfigMap" ] || { echo "::error::${SRC#app-repo/} is not a ConfigMap."; exit 1; }
+            BAD=$(yq '(.data // {}) | to_entries | .[] | select((.value | tag) != "!!str") | .key' "${SRC}")
+            if [ -n "${BAD}" ]; then
+              echo "::error::${SRC#app-repo/}: values must be quoted strings. Offending keys:"; echo "${BAD}"; exit 1
+            fi
+            if [ "$(yq '[.data.APP_PORT, .data.HEALTH_CHECK_STARTUP, .data.HEALTH_CHECK_LIVENESS, .data.HEALTH_CHECK_READINESS] | map(select(. != null)) | length' "${SRC}")" != "0" ]; then
+              echo "::warning::${SRC#app-repo/}: APP_PORT / HEALTH_CHECK_* are onboarding-only and are ignored by this sync."
+            fi
+            [ "$(yq '[.metadata.name, .metadata.namespace] | map(select(. != null and ((tag != "!!str") or (. == "")))) | length' "${SRC}")" = "0" ] \
+              || { echo "::error::${SRC#app-repo/}: metadata.name / metadata.namespace must be non-empty strings."; exit 1; }
+            yq '{"metadata": ((.metadata // {}) | pick(["name", "namespace", "labels", "annotations"])), "data": ((.data // {}) | del(.APP_PORT, .HEALTH_CHECK_STARTUP, .HEALTH_CHECK_LIVENESS, .HEALTH_CHECK_READINESS))}' "${SRC}" > "${OUT}/cm-${E}.yaml"
+          done
+
+          ES="${K8S}/external-secrets.yaml"
+          if [ -f "${ES}" ]; then
+            [ "$(yq '.kind' "${ES}")" = "ExternalSecret" ] || { echo "::error::K8S/external-secrets.yaml is not an ExternalSecret."; exit 1; }
+            BAD=$(yq '.spec.data | to_entries | .[] | select(((.value.secretKey // "") == "") or ((.value.remoteRef.key // "") == "")) | .key' "${ES}")
+            [ -z "${BAD}" ] || { echo "::error::spec.data entries (0-based index) need secretKey and remoteRef.key:"; echo "${BAD}"; exit 1; }
+            DUP=$(yq '[.spec.data[].secretKey] | group_by(.) | .[] | select(length > 1) | .[0]' "${ES}")
+            [ -z "${DUP}" ] || { echo "::error::Duplicate secretKey in K8S/external-secrets.yaml:"; echo "${DUP}"; exit 1; }
+            yq -e '.spec.dataFrom' "${ES}" > /dev/null 2>&1 && echo "::warning::spec.dataFrom is ignored; list entries under spec.data."
+            [ "$(yq '[.metadata.name, .metadata.namespace, .spec.target.name] | map(select(. != null and ((tag != "!!str") or (. == "")))) | length' "${ES}")" = "0" ] \
+              || { echo "::error::K8S/external-secrets.yaml: metadata.name / metadata.namespace / spec.target.name must be non-empty strings."; exit 1; }
+            cp "${ES}" "${OUT}/es.yaml"
+            yq '{"metadata": ((.metadata // {}) | pick(["name", "namespace", "labels", "annotations"])), "target": {"name": .spec.target.name}}' "${ES}" > "${OUT}/es-meta.yaml"
+          fi
+          ls "${OUT}"
+
+      - name: Apply to GitOps and open PRs
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          ACTOR:    ${{ github.actor }}
+          RUN_URL:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SRC_REPO: ${{ github.repository }}
+          SRC_REF:  ${{ github.ref_name }}
+          SRC_SHA:  ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd gitops-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          OUT="${RUNNER_TEMP}/k8s"
+
+          folders_for() {
+            case "$1" in
+              dev|qa) echo "$1" ;;
+              prod)
+                local PAIRS
+                PAIRS=$(gh variable get PROD_FOLDER_SUFFIX_PAIRS --repo "${GITOPS_REPO}") \
+                  || { echo "::error::Could not read PROD_FOLDER_SUFFIX_PAIRS from ${GITOPS_REPO}." >&2; return 1; }
+                echo "${PAIRS}" | tr ',' '\n' | cut -d: -f1 ;;
+            esac
+          }
+
+          ensure_resource() {
+            if ! R="$2" yq -e '.resources[] | select(. == strenv(R))' "$1" > /dev/null 2>&1; then
+              R="$2" yq -i '.resources = ((.resources // []) + [strenv(R)]) | .resources style=""' "$1"
+              echo "  ✓ kustomization: added $2"
+            fi
+          }
+
+          # Uses ES, HR, SECRET_NAME from apply_app (bash dynamic scope); updates SECRET_NAME.
+          apply_es_meta() {
+            local OLD="${SECRET_NAME}"
+            yq -i ".metadata = ((.metadata // {}) * (load(\"${OUT}/es-meta.yaml\") | .metadata // {}))" "${ES}"
+            if [ "$(yq '.target.name // ""' "${OUT}/es-meta.yaml")" != "" ]; then
+              yq -i ".spec.target.name = (load(\"${OUT}/es-meta.yaml\") | .target.name)" "${ES}"
+            fi
+            SECRET_NAME=$(yq '.spec.target.name // .metadata.name' "${ES}")
+            if [ "${SECRET_NAME}" != "${OLD}" ]; then
+              if O="${OLD}" yq -e '.spec.values.envFromSecrets[] | select(.secretName == strenv(O))' "${HR}" > /dev/null 2>&1; then
+                O="${OLD}" N="${SECRET_NAME}" yq -i '(.spec.values.envFromSecrets[] | select(.secretName == strenv(O)) | .secretName) = strenv(N)' "${HR}"
+              fi
+              echo "  ✓ external-secret: target renamed ${OLD} -> ${SECRET_NAME}"
+            fi
+          }
+
+          apply_app() {
+            local ENVN="$1" DIR="$2" HR KUST TEAM
+            HR=$(find "${DIR}" -maxdepth 1 \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) | sort | head -1)
+            KUST="${DIR}/kustomization.yaml"
+            if [ -z "${HR}" ] || [ ! -f "${KUST}" ]; then echo "::error::${DIR} has no helmrelease or kustomization.yaml."; return 1; fi
+            TEAM=$(yq '.metadata.namespace' "${HR}")
+
+            # ── ConfigMap: create if missing, then upsert keys ──
+            local CM="${DIR}/configmap.yaml" CM_NAME CM_OLD
+            if [ -f "${CM}" ]; then
+              CM_OLD=$(yq '.metadata.name' "${CM}")
+            else
+              CM_OLD="${APP}-config"
+              printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    app: %s\n' "${CM_OLD}" "${TEAM}" "${APP}" > "${CM}"
+              echo "  ✓ created ${CM}"
+            fi
+            CM_NAME="${CM_OLD}"
+            if [ -f "${OUT}/cm-${ENVN}.yaml" ]; then
+              yq -i ".metadata = ((.metadata // {}) * (load(\"${OUT}/cm-${ENVN}.yaml\") | .metadata // {}))" "${CM}"
+              CM_NAME=$(yq '.metadata.name' "${CM}")
+              if [ "${CM_NAME}" != "${CM_OLD}" ]; then
+                if O="${CM_OLD}" yq -e '.spec.values.envFrom.configMapRef[] | select(.name == strenv(O))' "${HR}" > /dev/null 2>&1; then
+                  O="${CM_OLD}" N="${CM_NAME}" yq -i '(.spec.values.envFrom.configMapRef[] | select(.name == strenv(O)) | .name) = strenv(N) | .spec.values.envFrom.configMapRef |= unique_by(.name)' "${HR}"
+                fi
+                echo "  ✓ configmap: renamed ${CM_OLD} -> ${CM_NAME}"
+              fi
+            fi
+            ensure_resource "${KUST}" configmap.yaml
+            if ! N="${CM_NAME}" yq -e '.spec.values.envFrom.configMapRef[] | select(.name == strenv(N))' "${HR}" > /dev/null 2>&1; then
+              N="${CM_NAME}" yq -i '.spec.values.envFrom.configMapRef = ((.spec.values.envFrom.configMapRef // []) + [{"name": strenv(N)}])' "${HR}"
+              echo "  ✓ helmrelease: envFrom ${CM_NAME}"
+            fi
+            if [ -f "${OUT}/cm-${ENVN}.yaml" ]; then
+              yq -i ".data = ((.data // {}) * (load(\"${OUT}/cm-${ENVN}.yaml\") | .data))" "${CM}"
+            else
+              echo "  • no K8S/configmap-${ENVN}.yaml — configmap left as is"
+            fi
+
+            # ── Secrets: append / update, never remove ──
+            [ -f "${OUT}/es.yaml" ] || return 0
+            local ES="${DIR}/external-secrets.yaml" SECRET_NAME COUNT I KEY ENTRY OWNER CUR NEW
+            if [ -f "${ES}" ]; then
+              SECRET_NAME=$(yq '.spec.target.name // .metadata.name' "${ES}")
+              apply_es_meta
+            else
+              SECRET_NAME="${APP}-secrets"
+            fi
+            COUNT=$(yq '.spec.data | length' "${OUT}/es.yaml")
+            for ((I=0; I<COUNT; I++)); do
+              KEY=$(yq ".spec.data[${I}].secretKey" "${OUT}/es.yaml")
+              ENTRY=$(yq -o=json -I=0 ".spec.data[${I}]" "${OUT}/es.yaml")
+              OWNER=$(K="${KEY}" yq '.spec.values.envFromSecrets[] | select(.name == strenv(K)) | .secretName' "${HR}" | head -1 || true)
+              if [ -n "${OWNER}" ] && [ "${OWNER}" != "${SECRET_NAME}" ]; then
+                echo "::warning::${KEY} is already wired from secret '${OWNER}' in ${HR} — skipped."; continue
+              fi
+              if K="${KEY}" yq -e '.spec.values.env[] | select(.name == strenv(K))' "${HR}" > /dev/null 2>&1; then
+                echo "::warning::${KEY} is already a plain env var in ${HR} — skipped."; continue
+              fi
+              if [ ! -f "${ES}" ]; then
+                printf 'apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: %s\n  namespace: %s\nspec:\n  refreshInterval: 5m\n  secretStoreRef:\n    name: azure-kv\n    kind: ClusterSecretStore\n  target:\n    name: %s\n    creationPolicy: Owner\n' "${SECRET_NAME}" "${TEAM}" "${SECRET_NAME}" > "${ES}"
+                echo "  ✓ created ${ES}"
+                apply_es_meta
+              fi
+              ensure_resource "${KUST}" external-secrets.yaml
+              CUR=$(K="${KEY}" yq -o=json -I=0 '.spec.data[] | select(.secretKey == strenv(K))' "${ES}" | jq -S -c . || true)
+              NEW=$(echo "${ENTRY}" | jq -S -c .)
+              if [ -z "${CUR}" ]; then
+                yq -i ".spec.data = ((.spec.data // []) + [load(\"${OUT}/es.yaml\") | .spec.data[${I}]])" "${ES}"
+                echo "  ✓ secret ${KEY}: added"
+              elif [ "${CUR}" != "${NEW}" ]; then
+                K="${KEY}" yq -i "(.spec.data[] | select(.secretKey == strenv(K))) = (load(\"${OUT}/es.yaml\") | .spec.data[${I}])" "${ES}"
+                echo "  ✓ secret ${KEY}: updated"
+              fi
+              if [ -z "${OWNER}" ]; then
+                K="${KEY}" S="${SECRET_NAME}" yq -i '.spec.values.envFromSecrets = ((.spec.values.envFromSecrets // []) + [{"name": strenv(K), "secretName": strenv(S), "secretKey": strenv(K)}]) | .spec.values.envFromSecrets style=""' "${HR}"
+                echo "  ✓ helmrelease: wired ${KEY}"
+              fi
+            done
+          }
+
+          declare -A WANT=( [dev]="${DO_DEV}" [qa]="${DO_QA}" [prod]="${DO_PROD}" )
+          for ENVN in dev qa prod; do
+            [ "${WANT[${ENVN}]}" = "true" ] || continue
+            BRANCH="config/${ENVN}/${APP}"
+            echo "::group::${ENVN}"
+            git fetch origin main "${BRANCH}" 2> /dev/null || git fetch origin main
+            git checkout -f -B "${BRANCH}" origin/main
+
+            FOLDERS=$(folders_for "${ENVN}")
+            APPLIED=0
+            for F in ${FOLDERS}; do
+              DIR="${FLUX_ROOT}/base/${F}/${APP}"
+              if [ ! -d "${DIR}" ]; then
+                echo "::warning::${DIR} does not exist — promote ${APP} to ${ENVN} first."; continue
+              fi
+              echo "→ ${DIR}"
+              apply_app "${ENVN}" "${DIR}"
+              APPLIED=$((APPLIED + 1))
+            done
+            [ "${APPLIED}" -gt 0 ] || { echo "::error::${APP} was not found in any ${ENVN} folder."; exit 1; }
+
+            git add -A "${FLUX_ROOT}/base"
+            if git diff --cached --quiet; then
+              echo "No changes for ${ENVN}."; echo "::endgroup::"; continue
+            fi
+            git commit -m "config(${ENVN}): sync K8S/ for ${APP}
+
+          From ${SRC_REPO}@${SRC_SHA} (${SRC_REF}), run by ${ACTOR}"
+            git push --force-with-lease origin "${BRANCH}"
+
+            PR=$(gh pr list --repo "${GITOPS_REPO}" --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')
+            if [ -n "${PR}" ]; then
+              echo "✓ PR #${PR} already open for ${BRANCH} — updated"
+            else
+              gh pr create --repo "${GITOPS_REPO}" --head "${BRANCH}" --base main \
+                --title "config(${ENVN}): sync K8S/ for ${APP}" \
+                --body "## K8S config sync — ${APP} (${ENVN})
+
+          **Source:** ${SRC_REPO} @ \`${SRC_REF}\` (${SRC_SHA})
+          **Run by:** @${ACTOR}
+          **Run:** ${RUN_URL}
+
+          Upsert/append only: no ConfigMap key or ExternalSecret entry is removed. Metadata (name, namespace, labels, annotations) from K8S/ is applied when set."
+            fi
+            echo "::endgroup::"
+          done

@@ -1,0 +1,425 @@
+name: Promote Application via GitOps (v3)
+run-name: "Promote (v3): ${{ inputs.fluxFolder }} → ${{ inputs.targetEnvironment }}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Generic reusable promotion workflow. Reads spec.values.image.tag from the
+# source environment's HelmRelease and writes it to the target.
+#
+# Environment mapping:
+#   qa   ← dev   (source resolved automatically)
+#   prod ← qa
+#
+# Onboarding only ever creates the DEV folder now. The qa folder is always
+# literally named "qa"; prod can fan out to multiple differently-named
+# folders (e.g. Horizon's 2 clusters) so its folder:suffix pairs live in a
+# PROD_FOLDER_SUFFIX_PAIRS variable on the GitOps repo itself (e.g.
+# "switzerlandnorth-prod:swn-prod,westus3-prod:wus3-prod" or "prod:prod") -
+# same for qa's ingress suffix (INGRESS_SUFFIX_QA variable, since it can
+# differ per ecosystem even though the folder name never does, e.g. Pando's
+# is "westeu-qa"). Adding a new region later is then just a variable update
+# on the GitOps repo - no template edit, no bulk-onboard re-run needed.
+# If a target folder doesn't exist yet, this workflow creates it by copying
+# the source folder and fixing the image registry (fetched from a variable
+# on the GitOps repo itself - CONTAINER_REGISTRY_NONPROD/CONTAINER_REGISTRY_PROD,
+# kept aligned with replicate-image-to-prod.yaml which uses the same two
+# variables). Whether a folder was just created or already existed, its image
+# tag/digest and ingress hostname(s) are then always checked against what they
+# should be and only rewritten if they actually differ - so an already-up-to-
+# date folder produces no diff/no PR, and a pre-existing folder that drifted
+# (or predates this convention) gets corrected too, not just brand new ones.
+# Any other env-specific config (log level, ASPNETCORE_ENVIRONMENT, etc.) is
+# left for developers to adjust manually.
+#
+# Namespace-per-team (Digital Solutions): the HelmRelease's metadata.namespace is the team.
+# If {fluxRoot}/base/{targetFolder}/base-chart/{team}.yaml does not exist yet,
+# it is copied from the source env and wired into that env's base-chart
+# kustomization (and the base-chart folder into the overlay) - so the first
+# app of a team reaching qa/prod brings its namespace + GitRepository along.
+#
+# Opens a GitOps PR — does NOT auto-merge for prod.
+# Branch naming: promote/{targetEnv}/{fluxFolder}-{imageTag}
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      imageRepository:
+        description: "Image repository (used in PR description only)"
+        required: true
+        type: string
+      fluxFolder:
+        description: "Flux GitOps folder name for this service (e.g. eit-cosmos-mvp)"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Root GitOps path inside Apps-GitOps (e.g. 3DX/flux/applications)"
+        required: true
+        type: string
+      targetEnvironment:
+        description: "Target environment: qa or prod"
+        required: true
+        type: string
+      gitopsRepo:
+        description: "GitHub repository containing the GitOps manifests (org/repo)"
+        required: false
+        type: string
+        default: "imc-grp/Apps-GitOps"
+    secrets:
+      FLUX_GITOPS_APPLICATION_PAT:
+        description: "PAT with contents:write and pull-requests:write on the GitOps repo (also needs read access to its Actions variables)"
+        required: false
+
+jobs:
+  promote:
+    name: Promote to ${{ inputs.targetEnvironment }}
+    # runs-on: ["self-hosted", "Region:il"]
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Resolve environments ────────────────────────────────────────────
+      - name: Resolve promotion parameters
+        id: params
+        run: |
+          set -euo pipefail
+          TARGET="${{ inputs.targetEnvironment }}"
+          case "${TARGET}" in
+            qa)   SOURCE="dev" ;;
+            prod) SOURCE="qa"  ;;
+            *)
+              echo "::error::Unknown target environment: '${TARGET}'. Expected: qa or prod."
+              exit 1
+              ;;
+          esac
+          BASE_PATH="${{ inputs.fluxRoot }}/base"
+          echo "source_env=${SOURCE}"   >> "$GITHUB_OUTPUT"
+          echo "target_env=${TARGET}"   >> "$GITHUB_OUTPUT"
+          echo "base_path=${BASE_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Promoting  : ${{ inputs.fluxFolder }}"
+          echo "Source env : ${SOURCE}"
+          echo "Target env : ${TARGET}"
+
+      # ── 2. Checkout GitOps repo ────────────────────────────────────────────
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+
+      # ── 3. Install yq + gh ─────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      # ── 4. Configure git ──────────────────────────────────────────────────
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 5. Read source image reference (tag + digest) ─────────────────────
+      - name: Read source image reference
+        id: source
+        run: |
+          set -euo pipefail
+          SOURCE_FOLDER="${{ steps.params.outputs.base_path }}/${{ steps.params.outputs.source_env }}/${{ inputs.fluxFolder }}"
+          SOURCE_HR=$(find "${SOURCE_FOLDER}" -maxdepth 1 \
+            \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+            | sort | head -1)
+          echo "Source HelmRelease: ${SOURCE_HR}"
+
+          if [ -z "${SOURCE_HR}" ] || [ ! -f "${SOURCE_HR}" ]; then
+            echo "::error::No helmrelease file found in ${SOURCE_FOLDER}"
+            exit 1
+          fi
+
+          SRC_TAG=$(yq '.spec.values.image.tag // ""' "${SOURCE_HR}")
+          SRC_DIGEST=$(yq '.spec.values.image.digest // ""' "${SOURCE_HR}")
+          [ "${SRC_TAG}"    = "null" ] && SRC_TAG=""
+          [ "${SRC_DIGEST}" = "null" ] && SRC_DIGEST=""
+
+          if [ -z "${SRC_TAG}" ] && [ -z "${SRC_DIGEST}" ]; then
+            echo "::error::No image.tag or image.digest found in ${SOURCE_HR}"
+            exit 1
+          fi
+
+          echo "image.tag    : ${SRC_TAG:-<not set>}"
+          echo "image.digest : ${SRC_DIGEST:-<not set>}"
+          echo "sourceFolder=${SOURCE_FOLDER}" >> "$GITHUB_OUTPUT"
+          echo "src_tag=${SRC_TAG}"       >> "$GITHUB_OUTPUT"
+          echo "src_digest=${SRC_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # ── 6. Create any target folders that don't exist yet ──────────────────
+      - name: Create missing target folders
+        id: targets
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+        run: |
+          set -euo pipefail
+          BASE_PATH="${{ steps.params.outputs.base_path }}"
+          TARGET_ENV="${{ steps.params.outputs.target_env }}"
+          SOURCE_ENV="${{ steps.params.outputs.source_env }}"
+          SOURCE_FOLDER="${{ steps.source.outputs.sourceFolder }}"
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+
+          # The registry AND the target folder:suffix pairs both live as
+          # variables on the GitOps repo itself - update them there (no
+          # template/code change, no bulk-onboard re-run needed) if e.g. a
+          # new prod region is added. qa's folder name is always literally
+          # "qa" (never varies); only its ingress suffix can differ per
+          # ecosystem, so that alone comes from a variable too.
+          #
+          # No silent defaults here: a failed variable read must hard-fail,
+          # never fall back to a guessed "prod:prod"/"qa:qa" pair - a wrong
+          # guess for a multi-region ecosystem (e.g. Horizon's prod fanning
+          # out to switzerlandnorth-prod/westus3-prod) silently creates a
+          # bogus, never-wired-up base folder instead of updating the real
+          # ones (see incident: Apps-GitOps PR #1094).
+          if [ "${TARGET_ENV}" = "prod" ]; then
+            REGISTRY_VAR_NAME="CONTAINER_REGISTRY_PROD"
+            PAIRS_VAR_NAME="PROD_FOLDER_SUFFIX_PAIRS"
+            if ! PAIRS=$(gh variable get "${PAIRS_VAR_NAME}" --repo "${{ inputs.gitopsRepo }}" 2>&1); then
+              echo "::error::Could not read '${PAIRS_VAR_NAME}' variable from ${{ inputs.gitopsRepo }} (gh output: ${PAIRS}). Refusing to fall back to a guessed default for prod - set this variable on the GitOps repo before retrying."
+              exit 1
+            fi
+          else
+            REGISTRY_VAR_NAME="CONTAINER_REGISTRY_NONPROD"
+            PAIRS_VAR_NAME="INGRESS_SUFFIX_QA"
+            if ! QA_SUFFIX=$(gh variable get "${PAIRS_VAR_NAME}" --repo "${{ inputs.gitopsRepo }}" 2>&1); then
+              echo "::error::Could not read '${PAIRS_VAR_NAME}' variable from ${{ inputs.gitopsRepo }} (gh output: ${QA_SUFFIX})."
+              exit 1
+            fi
+            PAIRS="qa:${QA_SUFFIX}"
+          fi
+          echo "pairs=${PAIRS}" >> "$GITHUB_OUTPUT"
+          echo "Target folder:suffix pairs: ${PAIRS}"
+
+          REGISTRY=$(gh variable get "${REGISTRY_VAR_NAME}" --repo "${{ inputs.gitopsRepo }}" 2>/dev/null || true)
+
+          IFS=',' read -ra PAIR_LIST <<< "${PAIRS}"
+          for PAIR in "${PAIR_LIST[@]}"; do
+            FOLDER="${PAIR%%:*}"
+            SUFFIX="${PAIR##*:}"
+            TARGET_DIR="${BASE_PATH}/${FOLDER}/${FLUX_FOLDER}"
+
+            if [ -d "${TARGET_DIR}" ]; then
+              echo "${FOLDER}/${FLUX_FOLDER} already exists — leaving folder as-is (image reference + ingress host are still reconciled in the next step)."
+            else
+              echo "${FOLDER}/${FLUX_FOLDER} does not exist yet — creating from ${SOURCE_FOLDER}"
+              mkdir -p "$(dirname "${TARGET_DIR}")"
+              cp -r "${SOURCE_FOLDER}" "${TARGET_DIR}"
+
+              HR="${TARGET_DIR}/helmrelease.yaml"
+              if [ -f "${HR}" ]; then
+                if [ -n "${REGISTRY}" ]; then
+                  yq -i ".spec.values.image.registry = \"${REGISTRY}\"" "${HR}"
+                  echo "  ✓ Set image.registry → ${REGISTRY}"
+                else
+                  # Never leave a freshly-created folder pointing at the wrong (source-env) registry.
+                  echo "::error::${REGISTRY_VAR_NAME} variable not found on ${{ inputs.gitopsRepo }} — refusing to create ${TARGET_DIR} with the wrong (${{ steps.params.outputs.source_env }}) registry. Set the variable before retrying."
+                  exit 1
+                fi
+              fi
+            fi
+
+            OVERLAY="${{ inputs.fluxRoot }}/overlays/${FOLDER}/kustomization.yaml"
+            add_overlay_entry() {
+              local ENTRY="  - $1"
+              if [ -f "${OVERLAY}" ] && ! grep -qF "${ENTRY}" "${OVERLAY}"; then
+                if [ -s "${OVERLAY}" ] && [ -n "$(tail -c1 "${OVERLAY}")" ]; then
+                  printf '\n' >> "${OVERLAY}"
+                fi
+                echo "${ENTRY}" >> "${OVERLAY}"
+                echo "  ✓ Added $1 to overlays/${FOLDER}/kustomization.yaml"
+              fi
+            }
+
+            # Team namespace bootstrap - copy base-chart/<team>.yaml from the source env
+            # the first time any app of this team reaches this env. Checked every run.
+            TARGET_HR=$(find "${TARGET_DIR}" -maxdepth 1 \
+              \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+              | sort | head -1 || true)
+            TEAM=""
+            [ -n "${TARGET_HR}" ] && TEAM=$(yq '.metadata.namespace // ""' "${TARGET_HR}")
+            [ "${TEAM}" = "null" ] && TEAM=""
+            SRC_TEAM_FILE="${BASE_PATH}/${SOURCE_ENV}/base-chart/${TEAM}.yaml"
+            if [ -n "${TEAM}" ] && [ -f "${SRC_TEAM_FILE}" ]; then
+              TEAM_DIR="${BASE_PATH}/${FOLDER}/base-chart"
+              mkdir -p "${TEAM_DIR}"
+              if [ ! -f "${TEAM_DIR}/${TEAM}.yaml" ]; then
+                cp "${SRC_TEAM_FILE}" "${TEAM_DIR}/${TEAM}.yaml"
+                echo "  ✓ Copied team bootstrap base-chart/${TEAM}.yaml → ${FOLDER}"
+              fi
+              if [ ! -f "${TEAM_DIR}/kustomization.yaml" ]; then
+                printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n' > "${TEAM_DIR}/kustomization.yaml"
+              fi
+              if ! yq -e ".resources[] | select(. == \"${TEAM}.yaml\")" "${TEAM_DIR}/kustomization.yaml" > /dev/null 2>&1; then
+                yq -i ".resources = ((.resources // []) + [\"${TEAM}.yaml\"]) | .resources style=\"\"" "${TEAM_DIR}/kustomization.yaml"
+                echo "  ✓ Added ${TEAM}.yaml to ${FOLDER}/base-chart/kustomization.yaml"
+              fi
+              add_overlay_entry "../../base/${FOLDER}/base-chart"
+            elif [ -n "${TEAM}" ] && [ ! -f "${BASE_PATH}/${FOLDER}/base-chart/${TEAM}.yaml" ]; then
+              echo "::warning::Team namespace '${TEAM}' has no base-chart/${TEAM}.yaml in ${SOURCE_ENV} or ${FOLDER} - add it manually or the HelmRelease will not reconcile."
+            fi
+
+            # Add to this env-region's overlay kustomization if missing - checked every run
+            # (not just on fresh creation) so a base folder that exists but was never wired
+            # into the overlay (e.g. from a prior partial promote) gets fixed too.
+            add_overlay_entry "../../base/${FOLDER}/${FLUX_FOLDER}"
+          done
+
+      # ── 7. Reconcile image reference + ingress host on every target ───────
+      # Runs for every folder (just-created or pre-existing) - only writes a
+      # field when it actually differs from what it should be, so an
+      # already-correct folder produces no diff/no PR either way.
+      - name: Reconcile image reference and ingress host
+        run: |
+          set -euo pipefail
+          BASE_PATH="${{ steps.params.outputs.base_path }}"
+          SRC_TAG="${{ steps.source.outputs.src_tag }}"
+          SRC_DIGEST="${{ steps.source.outputs.src_digest }}"
+          FLUX_FOLDER="${{ inputs.fluxFolder }}"
+
+          IFS=',' read -ra PAIR_LIST <<< "${{ steps.targets.outputs.pairs }}"
+          for PAIR in "${PAIR_LIST[@]}"; do
+            FOLDER="${PAIR%%:*}"
+            SUFFIX="${PAIR##*:}"
+            TARGET_DIR="${BASE_PATH}/${FOLDER}/${FLUX_FOLDER}"
+            TARGET_HR=$(find "${TARGET_DIR}" -maxdepth 1 \
+              \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+              | sort | head -1 || true)
+            if [ -z "${TARGET_HR}" ] || [ ! -f "${TARGET_HR}" ]; then
+              echo "::warning::No helmrelease file found in ${TARGET_DIR} — skipping."
+              continue
+            fi
+
+            # Image tag/digest: compare first, only write (and log) if it changed.
+            CUR_TAG=$(yq '.spec.values.image.tag // ""' "${TARGET_HR}")
+            CUR_DIGEST=$(yq '.spec.values.image.digest // ""' "${TARGET_HR}")
+            [ "${CUR_TAG}"    = "null" ] && CUR_TAG=""
+            [ "${CUR_DIGEST}" = "null" ] && CUR_DIGEST=""
+            if [ -n "${SRC_DIGEST}" ]; then
+              if [ "${CUR_DIGEST}" = "${SRC_DIGEST}" ]; then
+                echo "• ${TARGET_HR}: image.digest already up to date (${SRC_DIGEST})"
+              else
+                yq -i "del(.spec.values.image.tag)" "${TARGET_HR}"
+                yq -i ".spec.values.image.digest = \"${SRC_DIGEST}\"" "${TARGET_HR}"
+                echo "✓ ${TARGET_HR}: image.digest ${CUR_DIGEST:-<none>} → ${SRC_DIGEST}"
+              fi
+            elif [ -n "${SRC_TAG}" ]; then
+              if [ "${CUR_TAG}" = "${SRC_TAG}" ]; then
+                echo "• ${TARGET_HR}: image.tag already up to date (${SRC_TAG})"
+              else
+                yq -i ".spec.values.image.tag = \"${SRC_TAG}\"" "${TARGET_HR}"
+                echo "✓ ${TARGET_HR}: image.tag ${CUR_TAG:-<none>} → ${SRC_TAG}"
+              fi
+            fi
+
+            # Ingress host(s): everything between "{fluxFolder}-" and the
+            # first "." should equal this environment's suffix - works
+            # regardless of any ecosystem prefix (e.g. "3dx-", "infra-")
+            # since that part comes BEFORE fluxFolder and is left untouched.
+            # Compare first - only write if it's actually wrong (covers a
+            # freshly copied folder that still has the source's suffix, and
+            # any pre-existing folder that drifted or predates this rule).
+            HOST_COUNT=$(yq '.spec.values.ingress.hosts | length' "${TARGET_HR}" 2>/dev/null || echo 0)
+            for ((i=0; i<HOST_COUNT; i++)); do
+              OLD_HOST=$(yq ".spec.values.ingress.hosts[$i].host" "${TARGET_HR}")
+              NEW_HOST=$(echo "${OLD_HOST}" | sed -E "s/(${FLUX_FOLDER}-)[^.]+\./\1${SUFFIX}./")
+              if [ "${OLD_HOST}" = "${NEW_HOST}" ]; then
+                echo "• ${TARGET_HR}: ingress host already correct (${OLD_HOST})"
+              else
+                yq -i ".spec.values.ingress.hosts[$i].host = \"${NEW_HOST}\"" "${TARGET_HR}"
+                echo "✓ ${TARGET_HR}: ingress host ${OLD_HOST} → ${NEW_HOST}"
+              fi
+            done
+            TLS_HOST_COUNT=$(yq '.spec.values.ingress.tls.entries[0].hosts | length' "${TARGET_HR}" 2>/dev/null || echo 0)
+            for ((i=0; i<TLS_HOST_COUNT; i++)); do
+              OLD_HOST=$(yq ".spec.values.ingress.tls.entries[0].hosts[$i]" "${TARGET_HR}")
+              NEW_HOST=$(echo "${OLD_HOST}" | sed -E "s/(${FLUX_FOLDER}-)[^.]+\./\1${SUFFIX}./")
+              if [ "${OLD_HOST}" != "${NEW_HOST}" ]; then
+                yq -i ".spec.values.ingress.tls.entries[0].hosts[$i] = \"${NEW_HOST}\"" "${TARGET_HR}"
+                echo "✓ ${TARGET_HR}: tls host ${OLD_HOST} → ${NEW_HOST}"
+              fi
+            done
+          done
+
+      # ── 8. Commit and push ─────────────────────────────────────────────────
+      - name: Commit and push branch
+        id: git
+        run: |
+          set -euo pipefail
+          SRC_TAG="${{ steps.source.outputs.src_tag }}"
+          SRC_DIGEST="${{ steps.source.outputs.src_digest }}"
+
+          # Branch slug: prefer tag; fall back to first 12 hex chars of digest
+          if [ -n "${SRC_TAG}" ]; then
+            IMAGE_SLUG=$(echo "${SRC_TAG}" | sed 's/[^a-zA-Z0-9._-]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+          else
+            IMAGE_SLUG="sha-${SRC_DIGEST#sha256:}"
+            IMAGE_SLUG="${IMAGE_SLUG:0:16}"
+          fi
+
+          BRANCH="promote/${{ steps.params.outputs.target_env }}/${{ inputs.fluxFolder }}-${IMAGE_SLUG}"
+          echo "branchName=${BRANCH}" >> "$GITHUB_OUTPUT"
+          git checkout -b "${BRANCH}"
+          git add "${{ steps.params.outputs.base_path }}/" "${{ inputs.fluxRoot }}/overlays/"
+          if git diff --cached --quiet; then
+            echo "::warning::No manifest changes detected — nothing to promote."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          git commit -m "promote(${{ steps.params.outputs.target_env }}): ${{ inputs.fluxFolder }} image → ${IMAGE_SLUG}"
+          git push origin "${BRANCH}"
+
+      # ── 9. Open pull request ──────────────────────────────────────────────
+      - name: Open pull request
+        if: steps.git.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          PR_BODY=$(printf '## Promote via GitOps (v3)\n\n**Service:** `%s`\n**From:** `%s` → **To:** `%s`\n**Image tag:** `%s`\n\nAny newly created environment folder had its ingress host + image registry adjusted automatically - please still double check them.\n\n*Triggered by workflow run [`%s`](%s).*' \
+            "${{ inputs.fluxFolder }}" "${{ steps.params.outputs.source_env }}" "${{ steps.params.outputs.target_env }}" \
+            "${{ steps.source.outputs.src_tag }}" "${RUN_ID}" "${RUN_URL}")
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "${{ steps.git.outputs.branchName }}" \
+            --base main \
+            --title "promote(${{ steps.params.outputs.target_env }}): ${{ inputs.fluxFolder }} → ${{ steps.source.outputs.src_tag }}" \
+            --body "${PR_BODY}"
+
+      # ── 10. Report no-op promotion ──────────────────────────────────────────
+      - name: Report no changes needed
+        if: steps.git.outputs.has_changes != 'true'
+        run: |
+          {
+            echo "## Promote (v3): ${{ inputs.fluxFolder }} → ${{ inputs.targetEnvironment }}"
+            echo ""
+            echo "**No promotion needed** — \`${{ steps.params.outputs.target_env }}\` already has the same image reference as \`${{ steps.params.outputs.source_env }}\`."
+            echo ""
+            echo "- Image tag: \`${{ steps.source.outputs.src_tag }}\`"
+            echo "- Image digest: \`${{ steps.source.outputs.src_digest }}\`"
+            echo ""
+            echo "No branch or pull request was created."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::No promotion needed — ${{ steps.params.outputs.target_env }} already matches ${{ steps.params.outputs.source_env }}."
+

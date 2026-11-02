@@ -1,0 +1,161 @@
+name: Update GitOps HelmRelease Image Tag (v3)
+run-name: "GitOps update (v3): ${{ inputs.fluxFolder }} → ${{ inputs.imageTag }}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Generic reusable workflow: patches spec.values.image.tag in a single
+# HelmRelease manifest inside the GitOps repo and opens a PR.
+#
+# Manifest path resolved as:
+#   {fluxRoot}/base/{environment}/{fluxFolder}/{helmreleaseFile}
+#
+# Branch naming: deploy/{environment}/{fluxFolder}-{imageTag}
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      imageRepository:
+        description: "Image repository (used in PR description only)"
+        required: true
+        type: string
+      imageTag:
+        description: "Explicit image tag to deploy"
+        required: true
+        type: string
+      imageDigest:
+        description: "Image digest (sha256:...) to pin the deployment. Written alongside image.tag. Leave empty to write tag only."
+        required: false
+        type: string
+        default: ""
+      fluxFolder:
+        description: "Flux GitOps folder name for this service (e.g. eit-cosmos-mvp)"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Root GitOps path inside Apps-GitOps (e.g. 3DX/flux/applications)"
+        required: true
+        type: string
+      environment:
+        description: "Target GitOps environment folder (e.g. dev)"
+        required: false
+        type: string
+        default: "dev"
+      gitopsRepo:
+        description: "GitHub repository containing the GitOps manifests (org/repo)"
+        required: false
+        type: string
+        default: "imc-grp/Apps-GitOps"
+    secrets:
+      FLUX_GITOPS_APPLICATION_PAT:
+        description: "PAT with contents:write and pull-requests:write on the GitOps repo"
+        required: false
+
+jobs:
+  update-gitops:
+    name: Patch image.tag in HelmRelease
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve branch name
+        id: resolve
+        run: |
+          set -euo pipefail
+          BRANCH="deploy/${{ inputs.environment }}/${{ inputs.fluxFolder }}-${{ inputs.imageTag }}"
+          echo "branchName=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "Branch   : ${BRANCH}"
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          fetch-depth: 1
+
+      - name: Discover HelmRelease file
+        id: discover
+        run: |
+          set -euo pipefail
+          FOLDER="${{ inputs.fluxRoot }}/base/${{ inputs.environment }}/${{ inputs.fluxFolder }}"
+          MANIFEST=$(find "${FOLDER}" -maxdepth 1 \
+            \( -name "*helmrelease.yaml" -o -name "*helm-release.yaml" \) \
+            | sort | head -1)
+          if [ -z "${MANIFEST}" ]; then
+            echo "::error::No helmrelease file found in ${FOLDER}"
+            exit 1
+          fi
+          echo "manifestPath=${MANIFEST}" >> "$GITHUB_OUTPUT"
+          echo "Manifest : ${MANIFEST}"
+
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Patch image reference in HelmRelease manifest
+        run: |
+          set -euo pipefail
+          MANIFEST="${{ steps.discover.outputs.manifestPath }}"
+          if [ ! -f "${MANIFEST}" ]; then
+            echo "::error::Manifest not found: ${MANIFEST}"
+            exit 1
+          fi
+
+          DIGEST="${{ inputs.imageDigest }}"
+          TAG="${{ inputs.imageTag }}"
+
+          if [ -n "${DIGEST}" ]; then
+            # Digest-based: pin by SHA — no tag field, no comment (digest-only)
+            yq -i "del(.spec.values.image.tag)" "${MANIFEST}"
+            yq -i ".spec.values.image.digest = \"${DIGEST}\"" "${MANIFEST}"
+            echo "Updated ${MANIFEST}: image.digest → ${DIGEST}"
+          else
+            # Tag-only fallback (no digest available)
+            yq -i ".spec.values.image.tag = \"${TAG}\"" "${MANIFEST}"
+            echo "Updated ${MANIFEST}: image.tag → ${TAG}"
+          fi
+
+          yq '.spec.values.image' "${MANIFEST}"
+
+      - name: Commit and push branch
+        run: |
+          set -euo pipefail
+          git checkout -b "${{ steps.resolve.outputs.branchName }}"
+          git add "${{ steps.discover.outputs.manifestPath }}"
+          git commit -m "deploy(${{ inputs.environment }}): ${{ inputs.fluxFolder }} image.tag → ${{ inputs.imageTag }}"
+          git push origin "${{ steps.resolve.outputs.branchName }}"
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y gh
+          fi
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          PR_BODY=$(printf '## Automated GitOps update (v3)\n\n**Service:** `%s`\n**Environment:** `%s`\n**New image tag:** `%s`\n**Manifest:** `%s`\n\n*Triggered by workflow run [`%s`](%s).*' \
+            "${{ inputs.fluxFolder }}" "${{ inputs.environment }}" "${{ inputs.imageTag }}" \
+            "${{ steps.discover.outputs.manifestPath }}" "${RUN_ID}" "${RUN_URL}")
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "${{ steps.resolve.outputs.branchName }}" \
+            --base main \
+            --title "deploy(${{ inputs.environment }}): ${{ inputs.fluxFolder }} → ${{ inputs.imageTag }}" \
+            --body "${PR_BODY}"

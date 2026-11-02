@@ -1,0 +1,791 @@
+name: Onboard Microservice - Team namespace (v3)
+
+# ────────────────────────────────────────────────────────────────────────────
+# Shared onboarding engine (team namespace) - backend-only .NET, one image per repo,
+# namespace per TEAM, one GitOps folder per app.
+#
+# GitOps layout it maintains ({fluxRoot} = e.g. flux/applications):
+#   base/dev/base-chart/kustomization.yaml
+#   base/dev/base-chart/<team>.yaml    Namespace + ServiceAccount/RoleBinding
+#                                      (Flux helm-controller identity) +
+#                                      ExternalSecret git-creds + GitRepository
+#                                      base-helm-chart - created once per team
+#   base/dev/<app>/                    kustomization + helmrelease (+ configmap,
+#                                      external-secrets) - CREATE-ONLY: an
+#                                      existing app folder is never modified
+#   overlays/dev/kustomization.yaml    ../../base/dev/base-chart + app entries
+#
+# qa / prod folders (incl. the team file) are created by promote.yaml.
+#
+# Jobs:
+#   1. derive-vars      — clone target repo, detect .NET project/tests/Dockerfile
+#   2. setup-github     — grant runner group + org secrets, set repo variables,
+#                          create branches (qa, dev, hotfix-dev, hotfix-qa)
+#   3. push-workflows   — write the managed CI/CD workflow files (%%TOKEN%%
+#                          substitution) into the target repo
+#   4. gitops           — team bootstrap + dev app folder, open PR
+#   5. update-repo-list — add {url, team} to the CALLER's .github/onboard-repos.yaml
+#
+# Templates (workflow-templates/, gitops-templates/) are read from the CALLER
+# (the ecosystem's onboarding repo) - a checkout without `repository:` in a
+# reusable workflow checks out the calling repo.
+#
+# Org repo-name policy: names matching
+#   ^(ISIL|IECBG|TNJP)-(HKG88|HKG89|HKG90|HKG91|H692|HKG87|IT|Marketing)-<name>$
+# have the <Site>-<Department>- prefix stripped before deriving names.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      repoUrl:
+        description: "GitHub repo URL of the microservice to onboard"
+        required: true
+        type: string
+      team:
+        description: "Team = Kubernetes namespace (lowercase DNS label, e.g. payments)"
+        required: true
+        type: string
+
+      gitopsRepo:
+        description: "org/repo of the ecosystem's GitOps repo"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Path to flux/applications inside the GitOps repo"
+        required: true
+        type: string
+      ingressPrefix:
+        description: "Ingress host prefix, e.g. ds → ds-<app>-<suffix>.<ingressDomain>"
+        required: true
+        type: string
+      ingressDomain:
+        description: "Ingress DNS domain, e.g. imcgrp-cloud.com"
+        required: true
+        type: string
+
+      devBranchName:
+        description: "Working branch name, e.g. develop"
+        required: true
+        type: string
+      qaBranchName:
+        description: "QA branch name, e.g. qa"
+        required: true
+        type: string
+
+      containerRegistryNonProd:
+        description: "ACR hostname used for dev"
+        required: true
+        type: string
+      ingressSuffixDev:
+        description: "Ingress hostname suffix for dev, e.g. dev"
+        required: true
+        type: string
+      imagePinStrategyNonProd:
+        description: "digest or tag — how dev pins the placeholder image before the first real build"
+        required: false
+        type: string
+        default: "digest"
+
+      orgSecretsToGrant:
+        description: "Comma-separated list of ORG secret NAMES to grant this repo access to"
+        required: true
+        type: string
+      runnerGroupId:
+        required: false
+        type: string
+        default: "1"
+      workflowsOnly:
+        description: "true = only refresh the app repo's CI/CD workflow files (and its variables/grants); skip the GitOps PR and the onboarding-list update"
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      GH_ADMIN_PAT:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: Detect naming variables from the target repo ─────────────────────
+  derive-vars:
+    name: Derive naming variables
+    runs-on: ubuntu-latest
+    outputs:
+      orgRepo:        ${{ steps.derive.outputs.orgRepo }}
+      repoName:       ${{ steps.derive.outputs.repoName }}
+      appName:        ${{ steps.derive.outputs.appName }}
+      k8sName:        ${{ steps.derive.outputs.k8sName }}
+      imageRepo:      ${{ steps.derive.outputs.imageRepo }}
+      apiProject:     ${{ steps.derive.outputs.apiProject }}
+      dotnetVer:      ${{ steps.derive.outputs.dotnetVer }}
+      solutionFile:   ${{ steps.derive.outputs.solutionFile }}
+      hasTests:       ${{ steps.derive.outputs.hasTests }}
+      testsPath:      ${{ steps.derive.outputs.testsPath }}
+      dockerfilePath: ${{ steps.derive.outputs.dockerfilePath }}
+      defaultBranch:  ${{ steps.extract.outputs.defaultBranch }}
+      detectBranch:   ${{ steps.extract.outputs.detectBranch }}
+
+    steps:
+      - name: Validate team
+        env:
+          TEAM: ${{ inputs.team }}
+        run: |
+          if ! [[ "${TEAM}" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error::team '${TEAM}' is not a valid namespace name (lowercase letters, digits, '-', max 63 chars)."
+            exit 1
+          fi
+          case "${TEAM}" in
+            default|flux-system|external-secrets|kube-*|app-routing-system|monitoring|elastic-system|reloader)
+              echo "::error::team '${TEAM}' collides with a platform namespace."
+              exit 1 ;;
+          esac
+
+      - name: Extract org/repo from URL
+        id: extract
+        env:
+          GH_TOKEN: ${{ secrets.GH_ADMIN_PAT }}
+          REPO_URL: ${{ inputs.repoUrl }}
+          DEV_BRANCH: ${{ inputs.devBranchName }}
+        run: |
+          ORG_REPO=$(echo "${REPO_URL}" | sed 's|https://github.com/||; s|\.git$||')
+          echo "orgRepo=${ORG_REPO}" >> "$GITHUB_OUTPUT"
+
+          DEFAULT_BRANCH=$(gh api "repos/${ORG_REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
+          if gh api "repos/${ORG_REPO}/git/refs/heads/${DEV_BRANCH}" --silent 2>/dev/null; then
+            DETECT_BRANCH="${DEV_BRANCH}"
+          else
+            DETECT_BRANCH="${DEFAULT_BRANCH}"
+          fi
+          echo "defaultBranch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "detectBranch=${DETECT_BRANCH}"   >> "$GITHUB_OUTPUT"
+          echo "Detect branch: ${DETECT_BRANCH}  (default: ${DEFAULT_BRANCH})"
+
+      - name: Checkout target repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.extract.outputs.orgRepo }}
+          token: ${{ secrets.GH_ADMIN_PAT }}
+          ref: ${{ steps.extract.outputs.detectBranch }}
+          fetch-depth: 1
+
+      - name: Derive all variables
+        id: derive
+        env:
+          REPO_URL: ${{ inputs.repoUrl }}
+        run: |
+          set -euo pipefail
+
+          ORG_REPO=$(echo "${REPO_URL}" | sed 's|https://github.com/||; s|\.git$||')
+          REPO_NAME=$(basename "${ORG_REPO}")
+          echo "orgRepo=${ORG_REPO}"   >> "$GITHUB_OUTPUT"
+          echo "repoName=${REPO_NAME}" >> "$GITHUB_OUTPUT"
+
+          POLICY_REGEX='^(ISIL|IECBG|TNJP)-(HKG88|HKG89|HKG90|HKG91|H692|HKG87|IT|Marketing)-([A-Za-z0-9][A-Za-z0-9-]*)$'
+          if [[ "${REPO_NAME}" =~ ${POLICY_REGEX} ]]; then
+            APP_NAME="${BASH_REMATCH[3]}"
+            echo "Repo name matches the org naming policy — stripped to APP_NAME=${APP_NAME}"
+          else
+            APP_NAME="${REPO_NAME}"
+          fi
+          echo "appName=${APP_NAME}" >> "$GITHUB_OUTPUT"
+
+          K8S_NAME=$(echo "${APP_NAME}" | tr '[:upper:]' '[:lower:]' | tr '._' '--')
+          if ! [[ "${K8S_NAME}" =~ ^[a-z0-9]([-a-z0-9]{0,51}[a-z0-9])?$ ]]; then
+            echo "::error::Derived k8s name '${K8S_NAME}' is not a valid DNS label (max 53 chars for Helm)."
+            exit 1
+          fi
+          echo "k8sName=${K8S_NAME}"   >> "$GITHUB_OUTPUT"
+          echo "imageRepo=${K8S_NAME}" >> "$GITHUB_OUTPUT"
+
+          SLN=$(find . -maxdepth 2 -name "*.slnx" 2>/dev/null | head -1)
+          [ -z "${SLN}" ] && SLN=$(find . -maxdepth 2 -name "*.sln" 2>/dev/null | head -1)
+          [ -z "${SLN}" ] && SLN=$(find . -name "*.sln" -not -path "*/.git/*" 2>/dev/null | head -1)
+          SOLUTION_FILE="${SLN#./}"
+          echo "solutionFile=${SOLUTION_FILE}" >> "$GITHUB_OUTPUT"
+
+          if ! find . -name "*.csproj" -not -path "*/.git/*" -print -quit | grep -q .; then
+            echo "::error::No .csproj found in ${REPO_NAME} — this engine onboards .NET backends only."
+            exit 1
+          fi
+
+          TESTS_PATH=""
+          while IFS= read -r DIR; do
+            if find "${DIR}" -maxdepth 1 -name "*.csproj" -print -quit 2>/dev/null | grep -q .; then
+              TESTS_PATH="${DIR#./}"; break
+            fi
+          done < <(find . -type d -name "*[Tt]est*" -not -path "*/.git/*" 2>/dev/null | sort || true)
+          HAS_TESTS="false"; [ -n "${TESTS_PATH}" ] && HAS_TESTS="true"
+          echo "hasTests=${HAS_TESTS}"   >> "$GITHUB_OUTPUT"
+          echo "testsPath=${TESTS_PATH}" >> "$GITHUB_OUTPUT"
+
+          API_PROJECT=""
+          for CANDIDATE in "${APP_NAME}.Api" "${APP_NAME}.API" \
+            "src/${APP_NAME}.Api" "src/${APP_NAME}.API" \
+            "${APP_NAME}/Api" "${APP_NAME}/API" \
+            "${APP_NAME}" \
+            "Api" "API"; do
+            if [ -d "${CANDIDATE}" ] && ls "${CANDIDATE}"/*.csproj > /dev/null 2>&1; then
+              API_PROJECT="${CANDIDATE}"; break
+            fi
+          done
+          if [ -z "${API_PROJECT}" ]; then
+            # First project that references the Web SDK
+            WEB_CSPROJ=$(grep -rl --include="*.csproj" 'Sdk="Microsoft.NET.Sdk.Web"' . 2>/dev/null | grep -v '/.git/' | sort | head -1 || true)
+            if [ -n "${WEB_CSPROJ}" ]; then
+              API_PROJECT=$(dirname "${WEB_CSPROJ#./}")
+            else
+              API_PROJECT="${APP_NAME}.Api"
+            fi
+          fi
+          echo "apiProject=${API_PROJECT}" >> "$GITHUB_OUTPUT"
+
+          DOCKERFILE_PATH=""
+          if [ -f "${API_PROJECT}/Dockerfile" ]; then
+            DOCKERFILE_PATH="${API_PROJECT}/Dockerfile"
+          elif [ -f "Dockerfile" ]; then
+            DOCKERFILE_PATH="Dockerfile"
+          else
+            DOCKERFILE_PATH=$(find . -name "Dockerfile" -not -path "*/.git/*" 2>/dev/null | sort | head -1 | sed 's|^\./||')
+          fi
+          if [ -z "${DOCKERFILE_PATH}" ]; then
+            echo "::warning::No Dockerfile found in ${REPO_NAME} — set the DOCKERFILE_PATH repo variable before the first build."
+          fi
+          echo "dockerfilePath=${DOCKERFILE_PATH}" >> "$GITHUB_OUTPUT"
+
+          # The Dockerfile's SDK image is the version the app really builds with; TargetFramework is only a fallback.
+          DOTNET_VER=""
+          if [ -n "${DOCKERFILE_PATH}" ]; then
+            DOTNET_VER=$(grep -iE '^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?mcr\.microsoft\.com/dotnet/sdk:[0-9]+' "${DOCKERFILE_PATH}" \
+              | head -1 | grep -oiP 'dotnet/sdk:\K\d+' || true)
+          fi
+          if [ -n "${DOTNET_VER}" ]; then
+            echo "Detected .NET ${DOTNET_VER} from ${DOCKERFILE_PATH}"
+          else
+            DOTNET_VER=$(grep -r '<TargetFramework>' --include="*.csproj" -h 2>/dev/null \
+              | grep -oP 'net\K\d+' | head -1 || true)
+            [ -z "${DOTNET_VER}" ] && DOTNET_VER="8"
+            echo "::warning::No dotnet/sdk image found in the Dockerfile — using .NET ${DOTNET_VER} from TargetFramework/default."
+          fi
+          echo "dotnetVer=${DOTNET_VER}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Onboarding — derived variables"
+            echo "| Variable | Value |"
+            echo "|---|---|"
+            echo "| REPO_NAME | ${REPO_NAME} |"
+            echo "| APP_NAME | ${APP_NAME} |"
+            echo "| K8S_NAME / IMAGE_REPO | ${K8S_NAME} |"
+            echo "| TEAM (namespace) | ${{ inputs.team }} |"
+            echo "| API_PROJECT | ${API_PROJECT} |"
+            echo "| SOLUTION | ${SOLUTION_FILE:-<none>} |"
+            echo "| DOTNET | ${DOTNET_VER} |"
+            echo "| TESTS | ${TESTS_PATH:-<none>} |"
+            echo "| DOCKERFILE | ${DOCKERFILE_PATH:-<none>} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 2: Grant runner group, org secrets, set repo variables ─────────────
+  setup-github:
+    name: Grant access & set repo variables
+    needs: derive-vars
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN:    ${{ secrets.GH_ADMIN_PAT }}
+      K8S_NAME:    ${{ needs.derive-vars.outputs.k8sName }}
+      IMAGE_REPO:  ${{ needs.derive-vars.outputs.imageRepo }}
+      API_PROJECT: ${{ needs.derive-vars.outputs.apiProject }}
+      DOCKERFILE:  ${{ needs.derive-vars.outputs.dockerfilePath }}
+      ORG_REPO:    ${{ needs.derive-vars.outputs.orgRepo }}
+
+    steps:
+      - name: Get repo ID
+        id: repo
+        run: |
+          REPO_ID=$(gh api "repos/${ORG_REPO}" --jq '.id')
+          echo "repoId=${REPO_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Grant runner group
+        run: |
+          gh api -X PUT "orgs/imc-grp/actions/runner-groups/${{ inputs.runnerGroupId }}/repositories/${{ steps.repo.outputs.repoId }}" 2>&1 || true
+          echo "✓ Runner group ${{ inputs.runnerGroupId }}"
+
+      - name: Grant org secrets
+        env:
+          SECRETS_CSV: ${{ inputs.orgSecretsToGrant }}
+        run: |
+          REPO_ID="${{ steps.repo.outputs.repoId }}"
+          IFS=',' read -ra SECRET_NAMES <<< "${SECRETS_CSV}"
+          for SECRET in "${SECRET_NAMES[@]}"; do
+            SECRET="$(echo "${SECRET}" | xargs)"
+            [ -z "${SECRET}" ] && continue
+            gh api -X PUT "orgs/imc-grp/actions/secrets/${SECRET}/repositories/${REPO_ID}" 2>&1 || true
+            echo "✓ ${SECRET}"
+          done
+
+      - name: Set repo variables
+        run: |
+          set -euo pipefail
+          gh variable set IMAGE_REPOSITORY   --body "${IMAGE_REPO}"                          --repo "${ORG_REPO}"
+          gh variable set API_PROJECT_NAME   --body "${API_PROJECT}"                         --repo "${ORG_REPO}"
+          gh variable set CONTAINER_REGISTRY --body "${{ inputs.containerRegistryNonProd }}"  --repo "${ORG_REPO}"
+          if [ -n "${DOCKERFILE}" ]; then
+            gh variable set DOCKERFILE_PATH  --body "${DOCKERFILE}"                          --repo "${ORG_REPO}"
+          fi
+          gh variable set FLUX_FOLDER        --body "${K8S_NAME}"                            --repo "${ORG_REPO}"
+          gh variable set FLUX_ROOT          --body "${{ inputs.fluxRoot }}"                 --repo "${ORG_REPO}"
+          gh variable set INGRESS_PREFIX     --body "${{ inputs.ingressPrefix }}"             --repo "${ORG_REPO}"
+          echo "✓ Repo variables set"
+
+      - name: Create required branches if missing
+        env:
+          DEFAULT_BRANCH: ${{ needs.derive-vars.outputs.defaultBranch }}
+        run: |
+          set -euo pipefail
+
+          create_branch_if_missing() {
+            local BRANCH="$1" SOURCE="$2"
+            if gh api "repos/${ORG_REPO}/git/refs/heads/${BRANCH}" --silent 2>/dev/null; then
+              echo "Branch ${BRANCH} already exists"
+            else
+              SOURCE_SHA=$(gh api "repos/${ORG_REPO}/git/refs/heads/${SOURCE}" --jq '.object.sha')
+              gh api "repos/${ORG_REPO}/git/refs" -X POST \
+                -f ref="refs/heads/${BRANCH}" -f sha="${SOURCE_SHA}" || true
+              echo "✓ Created branch ${BRANCH} from ${SOURCE}"
+            fi
+          }
+
+          create_branch_if_missing "${{ inputs.qaBranchName }}"  "${DEFAULT_BRANCH}"
+          create_branch_if_missing "${{ inputs.devBranchName }}" "${{ inputs.qaBranchName }}"
+          create_branch_if_missing "hotfix-dev" "${DEFAULT_BRANCH}"
+          create_branch_if_missing "hotfix-qa"  "${DEFAULT_BRANCH}"
+
+  # ── Job 3: Write CI/CD workflow files into the target repo ─────────────────
+  push-workflows:
+    name: Write & push workflow files
+    needs: [derive-vars, setup-github]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout caller repo (workflow templates)
+        uses: actions/checkout@v5
+        with:
+          path: templates
+
+      - name: Checkout target repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.derive-vars.outputs.orgRepo }}
+          token: ${{ secrets.GH_ADMIN_PAT }}
+          ref: ${{ needs.derive-vars.outputs.defaultBranch }}
+          path: target-repo
+
+      - name: Configure git
+        working-directory: target-repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Remove .github from .gitignore if present
+        working-directory: target-repo
+        env:
+          DEFAULT_BRANCH: ${{ needs.derive-vars.outputs.defaultBranch }}
+        run: |
+          if [ -f .gitignore ] && grep -qE '^\/?\.github' .gitignore; then
+            sed -i -E '/^\/?\.github/d' .gitignore
+            git add .gitignore
+            git commit -m "chore: remove .github from .gitignore to allow CI/CD workflow files [skip ci]" || true
+            git push origin "${DEFAULT_BRANCH}" || true
+            echo "✓ Removed .github from .gitignore"
+          fi
+
+      - name: Process and write workflow files
+        env:
+          REPO_NAME:     ${{ needs.derive-vars.outputs.repoName }}
+          APP_NAME:      ${{ needs.derive-vars.outputs.appName }}
+          SOLUTION_FILE: ${{ needs.derive-vars.outputs.solutionFile }}
+          DOTNET_VER:    ${{ needs.derive-vars.outputs.dotnetVer }}
+          HAS_TESTS:     ${{ needs.derive-vars.outputs.hasTests }}
+          TESTS_PATH:    ${{ needs.derive-vars.outputs.testsPath }}
+        run: |
+          set -euo pipefail
+          mkdir -p target-repo/.github/workflows
+
+          apply_substitutions() {
+            sed \
+              -e "s|%%SOLUTION_FILE%%|${SOLUTION_FILE}|g" \
+              -e "s|%%REPO_NAME%%|${REPO_NAME}|g"         \
+              -e "s|%%APP_NAME%%|${APP_NAME}|g"           \
+              -e "s|%%DOTNET_VER%%|${DOTNET_VER}|g"       \
+              -e "s|%%TESTS_PATH%%|${TESTS_PATH}|g"
+          }
+
+          TMPL="templates/.github/workflow-templates"
+          # Only the managed files are (over)written - other workflows in the repo are left alone.
+          MANAGED=(DeployToAzure promote Hotfix SonarQube SyncK8sConfig)
+          [ "${HAS_TESTS}" = "true" ] && MANAGED+=(UnitTests)
+          for NAME in "${MANAGED[@]}"; do
+            apply_substitutions < "${TMPL}/${NAME}.yaml.tmpl" > "target-repo/.github/workflows/${NAME}.yaml"
+            echo "✓ ${NAME}.yaml"
+          done
+          [ "${HAS_TESTS}" = "true" ] || echo "⚠  UnitTests.yaml skipped (no test project detected)"
+          printf '%s\n' "${MANAGED[@]}" > managed.txt
+
+      - name: Commit and push
+        env:
+          DEFAULT_BRANCH:  ${{ needs.derive-vars.outputs.defaultBranch }}
+          DEV_BRANCH_NAME: ${{ inputs.devBranchName }}
+        working-directory: target-repo
+        run: |
+          set -euo pipefail
+          mapfile -t MANAGED < ../managed.txt
+          FILES=()
+          for NAME in "${MANAGED[@]}"; do FILES+=(".github/workflows/${NAME}.yaml"); done
+
+          git add -f "${FILES[@]}"
+          if git diff --cached --quiet; then
+            echo "Workflow files already up to date on ${DEFAULT_BRANCH}."
+          else
+            git commit -m "ci: add CI/CD workflows via automated onboarding [skip ci]
+
+          Onboarded by: ${{ github.actor }}"
+            git push origin "${DEFAULT_BRANCH}"
+            echo "✓ Pushed to ${DEFAULT_BRANCH}"
+          fi
+
+          # Keep the integration branches' copies identical (push/PR triggers read the branch's own file).
+          for BRANCH in "${DEV_BRANCH_NAME}" "${{ inputs.qaBranchName }}" hotfix-dev hotfix-qa; do
+            [ "${BRANCH}" = "${DEFAULT_BRANCH}" ] && continue
+            git ls-remote --exit-code --heads origin "${BRANCH}" > /dev/null 2>&1 || continue
+            git fetch --depth 1 origin "${BRANCH}"
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            git checkout "${DEFAULT_BRANCH}" -- "${FILES[@]}"
+            git add -f "${FILES[@]}"
+            if git diff --cached --quiet; then
+              echo "  ${BRANCH} already up to date"
+            else
+              git commit -m "ci: sync workflows from ${DEFAULT_BRANCH}"
+              git push origin "${BRANCH}" || echo "::warning::Could not push to ${BRANCH} (branch protection?) — sync it manually."
+            fi
+            git checkout "${DEFAULT_BRANCH}"
+          done
+
+      # Seed K8S/ once so developers have the files the "Sync K8S config" workflow reads.
+      # An existing K8S/ folder is never touched.
+      - name: Create K8S/ config files if missing
+        if: ${{ !inputs.workflowsOnly }}
+        env:
+          K8S_NAME:       ${{ needs.derive-vars.outputs.k8sName }}
+          DEFAULT_BRANCH: ${{ needs.derive-vars.outputs.defaultBranch }}
+        working-directory: target-repo
+        run: |
+          set -euo pipefail
+          FOUND=$(find . -maxdepth 2 -iname K8S -type d -not -path './.git/*' | head -1 || true)
+          if [ -n "${FOUND}" ]; then
+            echo "K8S/ already exists (${FOUND#./}) — left untouched."
+            exit 0
+          fi
+
+          mkdir K8S
+          for E in dev qa prod; do
+            printf 'apiVersion: v1\nkind: ConfigMap\ndata:\n  OpenTelemetry__ServiceName: "%s"\n' "${K8S_NAME}" > "K8S/configmap-${E}.yaml"
+          done
+          printf 'apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nspec:\n  data:\n    - secretKey: Tst\n      remoteRef:\n        key: test\n' > K8S/external-secrets.yaml
+
+          git checkout "${DEFAULT_BRANCH}"
+          git add -f K8S
+          git commit -m "chore: add K8S/ config files via automated onboarding [skip ci]"
+          git push origin "${DEFAULT_BRANCH}"
+          echo "✓ Created K8S/ on ${DEFAULT_BRANCH}"
+
+          # The GitOps job reads K8S/ from the dev branch, so every integration branch needs a copy.
+          for BRANCH in "${{ inputs.devBranchName }}" "${{ inputs.qaBranchName }}" hotfix-dev hotfix-qa; do
+            [ "${BRANCH}" = "${DEFAULT_BRANCH}" ] && continue
+            git ls-remote --exit-code --heads origin "${BRANCH}" > /dev/null 2>&1 || continue
+            git fetch --depth 1 origin "${BRANCH}"
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            if [ -n "$(find . -maxdepth 2 -iname K8S -type d -not -path './.git/*' | head -1)" ]; then
+              echo "  ${BRANCH} already has a K8S/ folder"
+            else
+              git checkout "${DEFAULT_BRANCH}" -- K8S
+              git add -f K8S
+              git commit -m "chore: add K8S/ config files from ${DEFAULT_BRANCH}"
+              git push origin "${BRANCH}" || echo "::warning::Could not push K8S/ to ${BRANCH} (branch protection?) — add it manually."
+            fi
+            git checkout "${DEFAULT_BRANCH}"
+          done
+
+  # ── Job 4: Team bootstrap + dev app folder, open PR ────────────────────────
+  gitops:
+    name: Create GitOps files (dev) & open PR
+    if: ${{ !inputs.workflowsOnly }}
+    needs: [derive-vars, setup-github, push-workflows]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN:   ${{ secrets.GH_ADMIN_PAT }}
+      K8S_NAME:   ${{ needs.derive-vars.outputs.k8sName }}
+      IMAGE_REPO: ${{ needs.derive-vars.outputs.imageRepo }}
+      REPO_NAME:  ${{ needs.derive-vars.outputs.repoName }}
+      APP_NAME:   ${{ needs.derive-vars.outputs.appName }}
+      TEAM:       ${{ inputs.team }}
+      FLUX_ROOT:  ${{ inputs.fluxRoot }}
+
+    steps:
+      - name: Checkout caller repo (gitops templates)
+        uses: actions/checkout@v5
+        with:
+          path: onboard-repo
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gitopsRepo }}
+          token: ${{ secrets.GH_ADMIN_PAT }}
+          fetch-depth: 1
+          path: gitops-repo
+
+      - name: Checkout target repo (for K8S configmap/secrets)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.derive-vars.outputs.orgRepo }}
+          token: ${{ secrets.GH_ADMIN_PAT }}
+          ref: ${{ needs.derive-vars.outputs.detectBranch }}
+          fetch-depth: 1
+          path: target-repo
+
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Configure git & branch
+        working-directory: gitops-repo
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B "onboard/${K8S_NAME}" origin/main
+
+      - name: Create GitOps files (dev only)
+        working-directory: gitops-repo
+        run: |
+          set -euo pipefail
+          TMPL="$(pwd)/../onboard-repo/.github/gitops-templates"
+          TARGET_REPO="$(pwd)/../target-repo"
+          ENV_DIR="${FLUX_ROOT}/base/dev"
+          OVERLAY="${FLUX_ROOT}/overlays/dev/kustomization.yaml"
+
+          export TEAM K8S_NAME IMAGE_REPO REPO_NAME APP_NAME
+          export REGISTRY="${{ inputs.containerRegistryNonProd }}"
+          export CONFIGMAP="${K8S_NAME}-config"
+          export INGRESS_HOST="${{ inputs.ingressPrefix }}-${K8S_NAME}-${{ inputs.ingressSuffixDev }}.${{ inputs.ingressDomain }}"
+          if [ "${{ inputs.imagePinStrategyNonProd }}" = "tag" ]; then
+            export IMAGE_PIN='tag: "latest"'
+          else
+            export IMAGE_PIN='digest: sha256:0000000000000000000000000000000000000000000000000000000000000000'
+          fi
+          VARS='${TEAM} ${K8S_NAME} ${IMAGE_REPO} ${REPO_NAME} ${APP_NAME} ${REGISTRY} ${CONFIGMAP} ${INGRESS_HOST} ${IMAGE_PIN}'
+          render() { envsubst "${VARS}" < "${TMPL}/$1"; }
+
+          if [ ! -f "${OVERLAY}" ]; then
+            echo "::error::${OVERLAY} not found in ${{ inputs.gitopsRepo }}"
+            exit 1
+          fi
+          add_overlay_entry() {
+            local ENTRY="  - $1"
+            if ! grep -qF "${ENTRY}" "${OVERLAY}"; then
+              if [ -s "${OVERLAY}" ] && [ -n "$(tail -c1 "${OVERLAY}")" ]; then
+                printf '\n' >> "${OVERLAY}"
+              fi
+              echo "${ENTRY}" >> "${OVERLAY}"
+              echo "✓ Added $1 to overlays/dev"
+            fi
+          }
+
+          # ── 1. Team bootstrap (once per team) ────────────────────────────────
+          TEAM_DIR="${ENV_DIR}/base-chart"
+          mkdir -p "${TEAM_DIR}"
+          if [ ! -f "${TEAM_DIR}/kustomization.yaml" ]; then
+            printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n' > "${TEAM_DIR}/kustomization.yaml"
+          fi
+          if [ -f "${TEAM_DIR}/${TEAM}.yaml" ]; then
+            echo "Team ${TEAM} already bootstrapped in dev — left untouched."
+          else
+            render team-namespace.yaml.tmpl > "${TEAM_DIR}/${TEAM}.yaml"
+            echo "✓ Created base-chart/${TEAM}.yaml (namespace, SA, git-creds, GitRepository)"
+          fi
+          if ! yq -e ".resources[] | select(. == \"${TEAM}.yaml\")" "${TEAM_DIR}/kustomization.yaml" > /dev/null 2>&1; then
+            yq -i ".resources = ((.resources // []) + [\"${TEAM}.yaml\"]) | .resources style=\"\"" "${TEAM_DIR}/kustomization.yaml"
+          fi
+          add_overlay_entry "../../base/dev/base-chart"
+
+          # ── 2. App folder (create-only) ─────────────────────────────────────
+          APP_DIR="${ENV_DIR}/${K8S_NAME}"
+          if [ -d "${APP_DIR}" ] && [ -n "$(ls -A "${APP_DIR}")" ]; then
+            EXISTING_NS=$(yq '.metadata.namespace // ""' "${APP_DIR}"/*helmrelease*.yaml 2>/dev/null | head -1 || true)
+            if [ -n "${EXISTING_NS}" ] && [ "${EXISTING_NS}" != "${TEAM}" ]; then
+              echo "::warning::${APP_DIR} already exists in namespace '${EXISTING_NS}', not '${TEAM}'. Moving teams is a manual change."
+            fi
+            echo "App folder ${APP_DIR} already exists — left untouched (create-only)."
+          else
+            mkdir -p "${APP_DIR}"
+            K8S_DIR=$(find "${TARGET_REPO}" -maxdepth 2 -iname "K8S" -type d -not -path "*/.git/*" 2>/dev/null | head -1 || true)
+            K8S_CM="${K8S_DIR:+${K8S_DIR}/configmap-dev.yaml}"
+            # Legacy single-file name, still honoured for dev.
+            if [ -n "${K8S_DIR}" ] && [ ! -f "${K8S_CM}" ]; then K8S_CM="${K8S_DIR}/configmap.yaml"; fi
+            K8S_SECRETS="${K8S_DIR:+${K8S_DIR}/external-secrets.yaml}"
+
+            render kustomization.yaml.tmpl > "${APP_DIR}/kustomization.yaml"
+            render configmap.yaml.tmpl     > "${APP_DIR}/configmap.yaml"
+            render helmrelease.yaml.tmpl   > "${APP_DIR}/helmrelease.yaml"
+            HR="${APP_DIR}/helmrelease.yaml"
+
+            # ConfigMap data + K8S directives (APP_PORT, HEALTH_CHECK_*) from K8S/configmap.yaml
+            APP_PORT=""; HC_LIVE=""; HC_READY=""; HC_START=""
+            if [ -n "${K8S_CM}" ] && [ -f "${K8S_CM}" ]; then
+              yq -i ".data = (.data // {}) * (load(\"${K8S_CM}\") | .data // {})" "${APP_DIR}/configmap.yaml"
+              APP_PORT=$(yq '.data.APP_PORT // ""' "${K8S_CM}")
+              HC_LIVE=$(yq '.data.HEALTH_CHECK_LIVENESS // ""' "${K8S_CM}")
+              HC_READY=$(yq '.data.HEALTH_CHECK_READINESS // ""' "${K8S_CM}")
+              HC_START=$(yq '.data.HEALTH_CHECK_STARTUP // ""' "${K8S_CM}")
+              yq -i 'del(.data.APP_PORT, .data.HEALTH_CHECK_LIVENESS, .data.HEALTH_CHECK_READINESS, .data.HEALTH_CHECK_STARTUP)' "${APP_DIR}/configmap.yaml"
+              echo "✓ Merged K8S/configmap.yaml"
+            fi
+            [ -z "${APP_PORT}" ] && APP_PORT=8080
+            if ! [[ "${APP_PORT}" =~ ^[0-9]+$ ]]; then
+              echo "::error::APP_PORT '${APP_PORT}' in K8S/configmap.yaml is not a number."
+              exit 1
+            fi
+            yq -i ".spec.values.containerPort = ${APP_PORT} | .spec.values.service.targetPort = ${APP_PORT}" "${HR}"
+            yq -i '.spec.values.env = (((.spec.values.env // []) + [{"name": "ASPNETCORE_HTTP_PORTS", "value": "'"${APP_PORT}"'"}]) | unique_by(.name))' "${HR}"
+
+            set_probe() {
+              local PROBE="$1" P="$2"
+              if [ -n "${P}" ]; then
+                yq -i ".spec.values.${PROBE}.enabled = true | .spec.values.${PROBE}.httpGet.path = \"${P}\" | .spec.values.${PROBE}.httpGet.port = ${APP_PORT}" "${HR}"
+              else
+                yq -i ".spec.values.${PROBE}.enabled = false | del(.spec.values.${PROBE}.httpGet)" "${HR}"
+              fi
+            }
+            set_probe startupProbe   "${HC_START}"
+            set_probe livenessProbe  "${HC_LIVE}"
+            set_probe readinessProbe "${HC_READY}"
+
+            # Dedicated ExternalSecret <app>-secrets from K8S/external-secrets.yaml
+            if [ -n "${K8S_SECRETS}" ] && [ -f "${K8S_SECRETS}" ]; then
+              SECRET_NAME="${K8S_NAME}-secrets"
+              yq eval '
+                {
+                  "apiVersion": "external-secrets.io/v1",
+                  "kind": "ExternalSecret",
+                  "metadata": {"name": "'"${SECRET_NAME}"'", "namespace": "'"${TEAM}"'"},
+                  "spec": {
+                    "refreshInterval": "5m",
+                    "secretStoreRef": {"name": "azure-kv", "kind": "ClusterSecretStore"},
+                    "target": {"name": "'"${SECRET_NAME}"'", "creationPolicy": "Owner"},
+                    "data": .spec.data
+                  }
+                }
+              ' "${K8S_SECRETS}" > "${APP_DIR}/external-secrets.yaml"
+              yq -i '.resources += ["external-secrets.yaml"]' "${APP_DIR}/kustomization.yaml"
+              while IFS= read -r KEY; do
+                [ -z "${KEY}" ] && continue
+                yq -i ".spec.values.envFromSecrets += [{\"name\": \"${KEY}\", \"secretName\": \"${SECRET_NAME}\", \"secretKey\": \"${KEY}\"}]" "${HR}"
+              done < <(yq '.spec.data[].secretKey' "${K8S_SECRETS}")
+              echo "✓ Generated ExternalSecret ${SECRET_NAME}"
+            fi
+            echo "✓ Created ${APP_DIR}"
+          fi
+          add_overlay_entry "../../base/dev/${K8S_NAME}"
+
+      - name: Commit, push & open PR
+        working-directory: gitops-repo
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --quiet && { echo "No GitOps changes needed."; exit 0; }
+
+          git commit -m "feat(onboard): add ${K8S_NAME} (team ${TEAM}) to dev
+
+          Service : ${REPO_NAME}
+          Onboarded by: ${{ github.actor }}"
+
+          git push --force-with-lease origin "onboard/${K8S_NAME}"
+
+          EXISTING_PR=$(gh pr list --repo "${{ inputs.gitopsRepo }}" --head "onboard/${K8S_NAME}" --state open --json number --jq '.[0].number // empty')
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "✓ PR #${EXISTING_PR} already open for onboard/${K8S_NAME} — updated"
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "${{ inputs.gitopsRepo }}" \
+            --head "onboard/${K8S_NAME}" \
+            --base main \
+            --title "feat(onboard): add ${K8S_NAME} (team ${TEAM}, dev)" \
+            --body "## Automated onboarding — ${REPO_NAME}
+
+          **App:** \`${K8S_NAME}\`  **Team / namespace:** \`${TEAM}\`
+          **Triggered by:** @${{ github.actor }}
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Only **dev** is created. qa/prod folders (and the team file) are created by promote.
+
+          ### Review before merging
+          - [ ] ConfigMap values and ExternalSecret keys
+          - [ ] Port / health-check paths
+          - [ ] Ingress host
+          - [ ] Resource requests/limits"
+
+  # ── Job 5: Keep the caller's own onboard-repos.yaml in sync ────────────────
+  update-repo-list:
+    name: Add repo to onboarding list
+    if: ${{ !inputs.workflowsOnly }}
+    needs: [derive-vars, gitops]
+    runs-on: ubuntu-latest
+    env:
+      REPO_URL:  ${{ inputs.repoUrl }}
+      REPO_NAME: ${{ needs.derive-vars.outputs.repoName }}
+      TEAM:      ${{ inputs.team }}
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_ADMIN_PAT }}
+
+      - name: Install yq
+        run: |
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+      - name: Add/update {url, team} in onboard-repos.yaml
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          FILE=".github/onboard-repos.yaml"
+          [ -f "${FILE}" ] || echo "repos: []" > "${FILE}"
+          yq -i '.repos = (.repos // [])' "${FILE}"
+
+          if yq -e ".repos[] | select(.url == \"${REPO_URL}\" and .team == \"${TEAM}\")" "${FILE}" > /dev/null 2>&1; then
+            echo "✓ ${REPO_NAME} already listed — no change."
+            exit 0
+          fi
+          yq -i "del(.repos[] | select(.url == \"${REPO_URL}\")) | .repos += [{\"url\": \"${REPO_URL}\", \"team\": \"${TEAM}\"}]" "${FILE}"
+
+          git add "${FILE}"
+          git commit -m "chore: add ${REPO_NAME} (team ${TEAM}) to onboarding repo list"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin main && break
+            echo "Push attempt ${i} failed — retrying..."
+            sleep $((RANDOM % 5 + 1))
+          done

@@ -1,0 +1,238 @@
+name: Build and Deploy to AKS (v3)
+run-name: "Build and Deploy (v3): ${{ inputs.imageRepository }}"
+
+# ───────────────────────────────────────────────────────────────────────────────────────
+# Generic CI workflow for regular (non-hotfix) pushes to the integration
+# branch. Unit tests, then a SonarQube scan, must succeed
+# before the Docker image is built and pushed to ACR; then gitops-update
+# patches the HelmRelease and opens a GitOps PR.
+#
+# enforceGate=false is report-only: tests and scan still run and warn, but
+# never block the build (staged rollout / break-glass).
+#
+# Hotfix mode: pass hotfixBranchRef to push an extra hotfix-{name} image tag
+# and skip the GitOps dev update (the unified hotfix workflow handles that).
+# Hotfix builds run on PR events, so only the unit tests block them there
+# (a SonarQube scan of a PR head needs Developer Edition PR analysis).
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      imageRepository:
+        description: "Image repository name in dot notation (e.g. eit.cosmos.api)"
+        required: true
+        type: string
+      apiProjectName:
+        description: "API project folder name (e.g. EIT.Cosmos.MVP.Api)"
+        required: true
+        type: string
+      dockerfilePath:
+        description: "Path to the Dockerfile relative to the repo root (e.g. src/EIT.Cosmos.MVP.Api/Dockerfile). Defaults to {apiProjectName}/Dockerfile."
+        required: false
+        type: string
+        default: ""
+      fluxFolder:
+        description: "Flux GitOps folder name for this service (e.g. eit-cosmos-mvp)"
+        required: true
+        type: string
+      fluxRoot:
+        description: "Root GitOps path inside Apps-GitOps (e.g. 3DX/flux/applications)"
+        required: true
+        type: string
+      containerRegistry:
+        description: "Azure Container Registry FQDN (e.g. WEULZ3DXShNonProd.azurecr.io)"
+        required: true
+        type: string
+      environment:
+        description: "Target GitOps environment folder (usually 'dev')"
+        required: false
+        type: string
+        default: "dev"
+      gitopsRepo:
+        description: "GitHub repository containing the GitOps manifests (org/repo)"
+        required: false
+        type: string
+        default: "imc-grp/Apps-GitOps"
+      hotfixBranchRef:
+        description: "Set to the hotfix branch ref (e.g. hotfix/fix-auth-bug) to push a hotfix-{name} tag and skip GitOps dev update. Leave empty for regular builds."
+        required: false
+        type: string
+        default: ""
+      sonarProjectKey:
+        description: "SonarQube project key. Defaults to the repository name."
+        required: false
+        type: string
+        default: ""
+      solutionFile:
+        description: "Solution/project the tests and scan build (e.g. Orders.sln). Empty = dotnet in the repo root."
+        required: false
+        type: string
+        default: ""
+      dotNetVersion:
+        description: ".NET SDK major version for the tests and scan (e.g. 8)"
+        required: false
+        type: string
+        default: "8"
+      enforceGate:
+        description: "true = failing tests or a failing SonarQube scan block the build; false = report-only (warns, never blocks)"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AZURE_SUBSCRIPTION_ID:
+        description: "Azure subscription ID used for Managed Identity ACR login"
+        required: true
+      FLUX_GITOPS_APPLICATION_PAT:
+        description: "PAT with contents:write and pull-requests:write on the GitOps repo"
+        required: false
+      NUGET_CONFIG_CONTENT:
+        description: "NuGet.Config XML for private feed auth — omit if not needed"
+        required: false
+      TLS_CRT_CONTENT:
+        description: "TLS certificate content paired with NUGET_CONFIG_CONTENT — omit if not needed"
+        required: false
+      SONAR_URL:
+        description: "URL of the SonarQube server"
+        required: false
+      SONAR_TOKEN:
+        description: "SonarQube token allowed to run analyses"
+        required: false
+
+jobs:
+  test:
+    name: Unit tests
+    uses: imc-grp/shared_workflows/.github/workflows/unit_tests.yaml@v3
+    with:
+      solutionFile:  ${{ inputs.solutionFile }}
+      dotNetVersion: ${{ inputs.dotNetVersion }}
+      enforce:       ${{ inputs.enforceGate }}
+    secrets:
+      NUGET_CONFIG_CONTENT: ${{ secrets.NUGET_CONFIG_CONTENT }}
+
+  scan:
+    name: SonarQube scan
+    # Hotfix PR builds: tests only (see header).
+    if: ${{ inputs.hotfixBranchRef == '' }}
+    needs: test
+    uses: imc-grp/shared_workflows/.github/workflows/sonarqube.yaml@v3
+    with:
+      projectKey:    ${{ inputs.sonarProjectKey }}
+      solutionFile:  ${{ inputs.solutionFile }}
+      dotNetVersion: ${{ inputs.dotNetVersion }}
+      enforce:       ${{ inputs.enforceGate }}
+    secrets:
+      SONAR_URL:            ${{ secrets.SONAR_URL }}
+      SONAR_TOKEN:          ${{ secrets.SONAR_TOKEN }}
+      NUGET_CONFIG_CONTENT: ${{ secrets.NUGET_CONFIG_CONTENT }}
+
+  build:
+    name: Build & Push Docker Image
+    # scan is skipped in hotfix mode; a plain needs would skip build too.
+    if: ${{ !cancelled() && needs.test.result == 'success' && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
+    needs: [test, scan]
+    runs-on: ["self-hosted", "Region:il"]
+    outputs:
+      imageTag:    ${{ steps.set-tag.outputs.imageTag }}
+      imageDigest: ${{ steps.set-tag.outputs.imageDigest }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Azure Login with Managed Identity
+        run: |
+          az login --identity
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Login to Azure Container Registry
+        run: az acr login -n ${{ inputs.containerRegistry }}
+
+      - name: Build and Push Docker Image
+        id: set-tag
+        run: |
+          set -euo pipefail
+          IMAGE="${{ inputs.containerRegistry }}/${{ inputs.imageRepository }}"
+          TAG="${{ github.run_id }}"
+
+          # Conditionally inject private feed credentials when secrets are set
+          echo "Checking for optional secrets: NUGET_CONFIG_CONTENT and TLS_CRT_CONTENT"
+          EXTRA_ARGS=""
+          NUGET="${{ secrets.NUGET_CONFIG_CONTENT }}"
+          TLS="${{ secrets.TLS_CRT_CONTENT }}"
+          if [ -n "${NUGET}" ]; then
+            EXTRA_ARGS="--build-arg USE_SECRETS=true --build-arg NUGET_CONFIG_CONTENT=${NUGET} --build-arg TLS_CRT_CONTENT=${TLS}"
+          fi
+
+          # Resolve Dockerfile path: use explicit input or fall back to {apiProjectName}/Dockerfile
+          DOCKERFILE="${{ inputs.dockerfilePath }}"
+          [ -z "${DOCKERFILE}" ] && DOCKERFILE="${{ inputs.apiProjectName }}/Dockerfile"
+
+          # shellcheck disable=SC2086
+          echo "Building Docker image from ${DOCKERFILE} with tag ${TAG}..."
+          docker build . -f "${DOCKERFILE}" \
+            -t "${{ inputs.imageRepository }}:${TAG}" \
+            --build-arg BUILD_CONFIGURATION=Release \
+            ${EXTRA_ARGS}
+
+          docker tag "${{ inputs.imageRepository }}:${TAG}" "${IMAGE}:${TAG}"
+          docker tag "${{ inputs.imageRepository }}:${TAG}" "${IMAGE}:latest"
+          echo "Pushing Docker image to ${IMAGE}..."
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
+
+          # Capture the immutable digest assigned by the registry after push.
+          # Non-fatal: if docker inspect does not return a RepoDigest (e.g. older
+          # daemon or transient issue) DIGEST is left empty and the tag is used instead.
+          DIGEST=""
+          RAW=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${TAG}" 2>/dev/null || true)
+          [ -n "${RAW}" ] && DIGEST=$(echo "${RAW}" | sed 's/.*@//') || true
+
+          echo "imageTag=${TAG}"       >> "$GITHUB_OUTPUT"
+          echo "imageDigest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${IMAGE}:${TAG} and ${IMAGE}:latest"
+          echo "Digest : ${DIGEST:-<not available>}"
+
+      # ── Hotfix mode: derive name and push stable hotfix-{name} tag ─────────
+      - name: Push hotfix image tag
+        if: ${{ inputs.hotfixBranchRef != '' }}
+        run: |
+          set -euo pipefail
+          IMAGE="${{ inputs.containerRegistry }}/${{ inputs.imageRepository }}"
+          REF="${{ inputs.hotfixBranchRef }}"
+
+          # Sanitize: strip hotfix/ prefix, lowercase, non-alphanumeric → hyphens
+          SUFFIX="${REF#hotfix/}"
+          CLEAN=$(echo "${SUFFIX}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9-]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+          CLEAN="${CLEAN:0:18}"
+          CLEAN="${CLEAN%-}"
+
+          if [ -z "${CLEAN}" ]; then
+            echo "::error::Could not derive a valid hotfix name from branch '${REF}'."
+            exit 1
+          fi
+
+          HOTFIX_TAG="hotfix-${CLEAN}"
+          docker tag "${{ inputs.imageRepository }}:${{ github.run_id }}" "${IMAGE}:${HOTFIX_TAG}"
+          docker push "${IMAGE}:${HOTFIX_TAG}"
+          echo "Pushed hotfix tag: ${IMAGE}:${HOTFIX_TAG}"
+
+  deploy:
+    name: Open GitOps PR → ${{ inputs.environment }}
+    # Skip GitOps dev update in hotfix mode — the unified hotfix workflow handles it
+    if: ${{ inputs.hotfixBranchRef == '' }}
+    needs: build
+    uses: imc-grp/shared_workflows/.github/workflows/gitops-update.yaml@v3
+    with:
+      imageRepository: ${{ inputs.imageRepository }}
+      imageTag:        ${{ needs.build.outputs.imageTag }}
+      imageDigest:     ${{ needs.build.outputs.imageDigest }}
+      fluxFolder:      ${{ inputs.fluxFolder }}
+      fluxRoot:        ${{ inputs.fluxRoot }}
+      environment:     ${{ inputs.environment }}
+      gitopsRepo:      ${{ inputs.gitopsRepo }}
+    secrets:
+      FLUX_GITOPS_APPLICATION_PAT: ${{ secrets.FLUX_GITOPS_APPLICATION_PAT }}
